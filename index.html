@@ -2,18 +2,31 @@
 <!--
   LinkedIn Client Inbox + Analytics (Konnector-backed) — static UI for the Supabase edge function API.
 
-  API (base: https://qypevxpscdhdrzlelolt.supabase.co/functions/v1/inbox):
-    GET  /api/inbox?[campaign_id=][&client_id=]      Bearer JWT -> {client,user,campaigns,conversations}
-    GET  /api/analytics?days=7|30|90|all[&campaign_id=]  Bearer JWT -> {range,campaigns,db,funnel}
-    GET  /api/thread?id=<conversation_id>             Bearer JWT -> {conversation,campaign,messages}
-    POST /api/reply {conversation_id, body}           Bearer JWT + can_reply -> {ok}
-    GET  /api/admin/overview                          Bearer JWT + is_admin
-    POST /api/admin/clients {name} · /clients/logo {client_id,logo_url}
-    POST /api/admin/campaigns/map {encrypted_id,name,client_id} · /campaigns/unmap {campaign_id}
-    POST /api/admin/users {email,client_id,can_reply,campaign_ids} · /users/delete {email}
-  Auth: Supabase email magic link. Whitelist lives in client_users.
-  Analytics is visible to every signed-in user; replying needs can_reply.
-  Agent hooks: window.INBOX_API_BASE, <script id="inbox-data"> mirrors state, rows/tiles carry data-* attrs.
+  FOR AI / AUTOMATION TOOLS
+  -------------------------
+  Driving the page:  window.INBOX  — call INBOX.describe() for the full action list.
+    INBOX.getState()                       current snapshot (same JSON as #inbox-data below)
+    INBOX.setFilter(k) / setSort(k) / setSender(name) / setCampaign(id) / search(text)
+    INBOX.setTab('inbox'|'analytics') / setPeriod('7'|'30'|'90'|'all')
+    INBOX.openThread(id) / sendReply(id, text)   ← sendReply sends a REAL LinkedIn message
+    INBOX.exportCsv() / refresh() / getAnalytics(days)
+  Reading the page:  <script id="inbox-data"> holds a JSON snapshot (client, user, applied
+    filters, counts, campaigns, senders, visible conversations, open thread, analytics summary).
+    Conversation rows carry data-conversation-id / -direction / -status / -sender / -waiting-hours;
+    KPI tiles carry data-kpi; funnel rows data-stage; charts have a "Show table" text twin.
+
+  Calling the API directly (base https://qypevxpscdhdrzlelolt.supabase.co/functions/v1/inbox):
+    GET  /api/meta                                   self-describing contract — start here
+    GET  /api/inbox?campaign_id=&filter=&sort=&q=&sender=
+         filter: all|needs_reply|waiting_48|engaged|answered|first_reply
+         sort:   recent|oldest_waiting|most_replies
+    GET  /api/analytics?days=7|30|90|all[&campaign_id=]
+    GET  /api/thread?id=<conversation_id>
+    GET  /api/export?format=csv|json&filter=
+    POST /api/reply {conversation_id, body}          requires can_reply
+    GET  /api/admin/overview · POST /api/admin/clients|clients/logo|campaigns/map|campaigns/unmap|users|users/delete
+  Auth: Supabase email magic link; send the JWT as `Authorization: Bearer <token>`. The email
+  must exist in client_users. Analytics is open to every signed-in user; replying needs can_reply.
 -->
 <html lang="en">
 <head>
@@ -92,6 +105,10 @@
   .chip .c{opacity:.75;font-weight:500}
   #search-row{padding:8px 12px;border-bottom:1px solid var(--line)}
   #search{width:100%;padding:8px 11px;border:1px solid var(--line);border-radius:9px}
+  #list-controls{display:flex;gap:6px;margin-top:8px;align-items:center}
+  #list-controls select{flex:1;min-width:0;padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:.8rem;color:var(--muted)}
+  #list-controls .tbtn{flex:none}
+  .badge.wait{background:#fdeeee;color:var(--red)}
   #conv-list{flex:1;overflow-y:auto;min-height:0}
   .row{display:flex;gap:10px;padding:11px 13px;border-bottom:1px solid var(--line);cursor:pointer}
   .row:hover{background:#f8fafc}
@@ -286,9 +303,20 @@
     <div id="stats" data-role="stats"></div>
     <main>
       <section id="list-pane">
-        <div id="chips" data-role="chips"></div>
-        <div id="search-row"><input id="search" type="search" placeholder="Search name, company, message…" autocomplete="off"></div>
-        <div id="conv-list" data-role="conversation-list"></div>
+        <div id="chips" data-role="chips" role="group" aria-label="Conversation filters"></div>
+        <div id="search-row">
+          <input id="search" type="search" placeholder="Search name, company, message…" autocomplete="off" aria-label="Search conversations">
+          <div id="list-controls">
+            <select id="sender-select" aria-label="Filter by LinkedIn profile" data-role="sender-filter"><option value="">All profiles</option></select>
+            <select id="sort-select" aria-label="Sort conversations" data-role="sort">
+              <option value="recent">Newest first</option>
+              <option value="oldest_waiting">Longest waiting</option>
+              <option value="most_replies">Most replies</option>
+            </select>
+            <button id="export-btn" class="tbtn" title="Download this list as CSV">Export</button>
+          </div>
+        </div>
+        <div id="conv-list" data-role="conversation-list" role="list" aria-live="polite"></div>
       </section>
       <section id="thread-pane">
         <div id="thread-placeholder">Select a conversation to read it</div>
@@ -324,6 +352,8 @@
       <button class="chip" data-days="90">90 days</button>
       <button class="chip" data-days="all">All time</button>
       <span id="range-note" style="font-size:.76rem;color:var(--text-muted)"></span>
+      <span style="flex:1"></span>
+      <span style="font-size:.74rem;color:var(--text-muted)">Everything below follows this period, except tiles marked “right now”.</span>
     </div>
     <div id="analytics-body"></div>
   </div>
@@ -380,10 +410,25 @@ window.INBOX_API_BASE = API;
 const sb = createClient(SUPABASE_URL, ANON_KEY, { auth: { detectSessionInUrl: true, flowType: "implicit" } });
 const $ = (id) => document.getElementById(id);
 const state = {
-  data: null, filter: "all", search: "", campaign: "", thread: null,
+  data: null, filter: "all", search: "", campaign: "", sender: "", sort: "recent", thread: null,
   adminClientId: "", appStarted: false, refreshTimer: null, admin: null,
   tab: "inbox", days: "30", analytics: null, anLoading: false,
 };
+
+// filter key -> label + one-line meaning (also surfaced to agents via INBOX.describe())
+const FILTER_DEFS = [
+  ["all", "All", "Every conversation where the lead has replied at least once"],
+  ["needs_reply", "Needs reply", "The lead spoke last — waiting on you"],
+  ["waiting_48", "Waiting 48h+", "Lead spoke last and has been waiting more than two days"],
+  ["engaged", "In conversation", "A real back-and-forth is going"],
+  ["answered", "We replied", "Your team spoke last"],
+  ["first_reply", "Replied once", "The lead replied but the exchange never continued"],
+];
+const SORT_DEFS = [
+  ["recent", "Newest first"],
+  ["oldest_waiting", "Longest waiting"],
+  ["most_replies", "Most replies"],
+];
 
 const C = {
   s1: "#0a66c2", s2: "#eb6834",
@@ -392,17 +437,82 @@ const C = {
   grid: "#e1e0d9", base: "#c3c2b7", muted: "#898781", surface: "#ffffff",
 };
 
+// Full machine-readable snapshot of what is on screen, kept in #inbox-data so an
+// agent driving the page can read state without scraping the DOM.
 function mirror() {
   try {
+    const d = state.data, a = state.analytics;
     $("inbox-data").textContent = JSON.stringify({
-      tab: state.tab, campaign: state.campaign, filter: state.filter, days: state.days,
-      search: state.search, thread_id: state.thread?.conversation?.id ?? null,
-      conversations: state.data?.conversations?.length ?? 0,
-      user: state.data?.user ?? null,
-      analytics_loaded: !!state.analytics,
+      view: state.tab,
+      client: d?.client ?? null,
+      user: d?.user ?? null,
+      applied: {
+        campaign_id: state.campaign, campaign_name: d ? campName(state.campaign) : "",
+        filter: state.filter, sort: state.sort, sender: state.sender, search: state.search,
+        analytics_period_days: state.days,
+      },
+      counts: d?.counts ?? null,
+      total_matching: d?.total_matching ?? null,
+      shown: d?.conversations?.length ?? 0,
+      campaigns: (d?.campaigns ?? []).map(c => ({ id: c.id, name: c.name, status: c.status })),
+      senders: d?.senders ?? [],
+      conversations: (d?.conversations ?? []).slice(0, 60).map(c => ({
+        id: c.id, name: c.profile?.name, company: c.profile?.company_name,
+        status: c.conversation_status, last_direction: c.last_direction,
+        waiting_hours: c.waiting_hours, sender: c.sender_name,
+        last_message_at: c.last_message_at, preview: c.last_message_preview,
+      })),
+      open_thread: state.thread ? {
+        id: state.thread.conversation.id,
+        name: state.thread.conversation.profile?.name,
+        messages: state.thread.messages.length,
+      } : null,
+      analytics: a ? { period: a.range?.label, live: a.db?.live ?? null, range: a.db?.range ?? null, funnel: a.funnel ?? null } : null,
+      api_base: API,
+      agent_api: "window.INBOX — call INBOX.describe() for the action list",
     });
   } catch {}
 }
+
+// Stable action surface for AI / automation tools driving the page.
+window.INBOX = {
+  describe() {
+    return {
+      state: "INBOX.getState() — same JSON as the #inbox-data script tag",
+      actions: {
+        "setFilter(key)": FILTER_DEFS.map(([k, l, h]) => ({ key: k, label: l, meaning: h })),
+        "setSort(key)": SORT_DEFS.map(([k, l]) => ({ key: k, label: l })),
+        "setSender(name|'')": "restrict to one LinkedIn sending profile",
+        "setCampaign(id|'')": "scope both tabs to one campaign",
+        "search(text)": "server-side search over name, company, headline, message text and sender",
+        "setTab('inbox'|'analytics')": "switch view",
+        "setPeriod('7'|'30'|'90'|'all')": "analytics period",
+        "openThread(id)": "open a conversation and return its messages",
+        "sendReply(id, text)": "send a REAL LinkedIn message — requires can_reply",
+        "exportCsv()": "download the current list as CSV",
+        "refresh()": "reload the current view",
+      },
+      rest_api: API + "/api/meta",
+    };
+  },
+  getState() { try { return JSON.parse($("inbox-data").textContent); } catch { return null; } },
+  async setFilter(key) { if (!FILTER_DEFS.some(f => f[0] === key)) throw new Error("unknown filter"); state.filter = key; await load(true); renderChips(); return this.getState(); },
+  async setSort(key) { if (!SORT_DEFS.some(s => s[0] === key)) throw new Error("unknown sort"); state.sort = key; await load(true); return this.getState(); },
+  async setSender(name) { state.sender = name ?? ""; await load(true); return this.getState(); },
+  async setCampaign(id) { state.campaign = id ?? ""; $("campaign-select").value = state.campaign; closeThread(); state.analytics = null; await load(true); if (state.tab === "analytics") await loadAnalytics(); return this.getState(); },
+  async search(text) { state.search = text ?? ""; $("search").value = state.search; await load(true); return this.getState(); },
+  setTab(tab) { setTab(tab === "analytics" ? "analytics" : "inbox"); return this.getState(); },
+  async setPeriod(days) { state.days = String(days); for (const x of document.querySelectorAll("#range-row .chip")) x.classList.toggle("active", x.dataset.days === state.days); await loadAnalytics(); return this.getState(); },
+  async openThread(id) { await openThread(id); return state.thread; },
+  async sendReply(id, text) {
+    if (!state.data?.user?.can_reply) throw new Error("this account cannot reply");
+    const r = await api("/api/reply", { method: "POST", body: JSON.stringify({ conversation_id: id, body: String(text ?? "") }) });
+    state.analytics = null; await load(true); return r;
+  },
+  exportCsv() { $("export-btn").click(); },
+  async refresh() { await load(true); if (state.tab === "analytics") { state.analytics = null; await loadAnalytics(); } return this.getState(); },
+  async getAnalytics(days) { if (days) state.days = String(days); await loadAnalytics(); return state.analytics; },
+};
 
 async function token() { const { data } = await sb.auth.getSession(); return data?.session?.access_token ?? null; }
 
@@ -473,7 +583,7 @@ $("login-btn").addEventListener("click", async () => {
 });
 $("logout-btn").addEventListener("click", async () => {
   await sb.auth.signOut();
-  Object.assign(state, { data: null, filter: "all", search: "", campaign: "", thread: null, adminClientId: "", admin: null, tab: "inbox", analytics: null });
+  Object.assign(state, { data: null, filter: "all", search: "", campaign: "", sender: "", sort: "recent", thread: null, adminClientId: "", admin: null, tab: "inbox", analytics: null });
   $("search").value = ""; $("admin-btn").classList.add("hidden");
   $("admin-client-switch").classList.add("hidden"); $("admin-overlay").classList.add("hidden");
   document.body.classList.remove("thread-open"); closeThread(); setTab("inbox");
@@ -496,12 +606,17 @@ async function startApp() {
   }
 }
 
-async function load(silent) {
-  const qs = new URLSearchParams({ filter: state.filter });
+function inboxQuery() {
+  const qs = new URLSearchParams({ filter: state.filter, sort: state.sort });
   if (state.campaign) qs.set("campaign_id", state.campaign);
   if (state.search.trim()) qs.set("q", state.search.trim());
-  state.data = await api("/api/inbox?" + qs.toString());
-  renderHeader(); renderStats(); renderChips(); renderList(); mirror();
+  if (state.sender) qs.set("sender", state.sender);
+  return qs;
+}
+
+async function load(silent) {
+  state.data = await api("/api/inbox?" + inboxQuery().toString());
+  renderHeader(); renderStats(); renderChips(); renderControls(); renderList(); mirror();
   if (!silent && state.data.user?.is_admin) { $("admin-btn").classList.remove("hidden"); setupClientSwitch(); }
 }
 
@@ -569,18 +684,17 @@ function renderStats() {
 const filteredConvs = () => state.data.conversations;
 
 function renderChips() {
-  const counts = state.data.counts ?? { all: 0, needs_reply: 0, handled: 0 };
-  const chips = [
-    ["all", "All", counts.all],
-    ["needs_reply", "Needs reply", counts.needs_reply],
-    ["handled", "Replied", counts.handled],
-  ];
+  const counts = state.data.counts ?? {};
   const wrap = $("chips"); wrap.innerHTML = "";
-  for (const [key, label, count] of chips) {
+  for (const [key, label, hint] of FILTER_DEFS) {
+    const count = counts[key];
+    if (key !== "all" && !count) continue;               // hide filters with nothing in them
     const b = document.createElement("button");
     b.className = "chip" + (state.filter === key ? " active" : "");
     b.dataset.filter = key;
-    b.innerHTML = `${label} <span class="c">${nf(count)}</span>`;
+    b.title = hint;
+    b.setAttribute("aria-pressed", state.filter === key ? "true" : "false");
+    b.innerHTML = `${label} <span class="c">${nf(count ?? 0)}</span>`;
     b.addEventListener("click", async () => {
       if (state.filter === key) return;
       state.filter = key; renderChips();
@@ -588,6 +702,21 @@ function renderChips() {
     });
     wrap.appendChild(b);
   }
+}
+
+function renderControls() {
+  const sel = $("sender-select");
+  const senders = state.data.senders ?? [];
+  sel.innerHTML = `<option value="">All profiles${senders.length ? " (" + senders.length + ")" : ""}</option>`;
+  for (const s of senders) {
+    const o = document.createElement("option");
+    o.value = s.name; o.textContent = `${s.name} · ${s.n}`;
+    sel.appendChild(o);
+  }
+  sel.value = senders.some(s => s.name === state.sender) ? state.sender : "";
+  state.sender = sel.value;
+  sel.classList.toggle("hidden", senders.length < 2);   // only the profile picker, not the whole row
+  $("sort-select").value = state.sort;
 }
 const campName = (id) => state.data.campaigns.find(c => c.id === id)?.name ?? "";
 function renderList() {
@@ -607,10 +736,18 @@ function renderList() {
   for (const cv of rows) {
     const div = document.createElement("div");
     div.className = "row" + (state.thread?.conversation?.id === cv.id ? " sel" : "");
+    div.setAttribute("role", "listitem");
     div.dataset.conversationId = cv.id;
     div.dataset.direction = cv.last_direction ?? "";
+    div.dataset.status = cv.conversation_status ?? "";
+    div.dataset.sender = cv.sender_name ?? "";
+    if (cv.waiting_hours != null) div.dataset.waitingHours = cv.waiting_hours;
     const img = cv.profile?.image ? `<img src="${esc(cv.profile.image)}" alt="" onerror="this.remove()">` : "";
-    const await_ = cv.last_direction === "REPLY" ? `<span class="badge await">Awaiting your reply</span>` : "";
+    const wh = cv.waiting_hours;
+    const await_ = cv.last_direction !== "REPLY" ? ""
+      : wh != null && wh >= 48
+        ? `<span class="badge wait">Waiting ${wh >= 48 ? Math.round(wh / 24) + " days" : wh + "h"}</span>`
+        : `<span class="badge await">Awaiting your reply</span>`;
     const campBadge = !state.campaign && state.data.campaigns.length > 1 ? `<span class="badge camp">${esc(shorten(campName(cv.campaign_id), 30))}</span>` : "";
     div.innerHTML = `
       <span class="avatar">${img}${img ? "" : initials(cv.profile?.name)}</span>
@@ -694,6 +831,34 @@ $("search").addEventListener("input", (e) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(async () => { try { await load(true); } catch (err) { console.error(err); } }, 350);
 });
+$("sender-select").addEventListener("change", async (e) => {
+  state.sender = e.target.value;
+  try { await load(true); } catch (err) { console.error(err); }
+});
+$("sort-select").addEventListener("change", async (e) => {
+  state.sort = e.target.value;
+  try { await load(true); } catch (err) { console.error(err); }
+});
+$("export-btn").addEventListener("click", async () => {
+  const b = $("export-btn"); b.disabled = true; const old = b.textContent; b.textContent = "…";
+  try {
+    const t = await token();
+    const u = new URL(API + "/api/export");
+    u.searchParams.set("format", "csv");
+    u.searchParams.set("filter", state.filter);
+    if (state.campaign) u.searchParams.set("campaign_id", state.campaign);
+    if (state.adminClientId) u.searchParams.set("client_id", state.adminClientId);
+    const res = await fetch(u, { headers: { Authorization: "Bearer " + t } });
+    if (!res.ok) throw new Error("export failed (" + res.status + ")");
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `linkedin-conversations-${state.filter}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  } catch (e) { alert("Could not export: " + e.message); }
+  finally { b.disabled = false; b.textContent = old; }
+});
 $("campaign-select").addEventListener("change", async (e) => {
   state.campaign = e.target.value; closeThread();
   await load(true);
@@ -769,6 +934,7 @@ function renderAnalytics() {
         across ${nf(rng.leads_replying ?? 0)} people · ${nf(live.conversations ?? 0)} conversations tracked in total</span>
     </div>
     <div class="kpis" style="margin-top:16px">
+      ${kpi("Leads in campaigns", compact(a.leads_in_campaigns), "people targeted in total")}
       ${kpi("Invitations sent", compact(fn.invites_sent), fn.invites_sent ? null : "none in this period")}
       ${kpi("Connections accepted", compact(fn.invites_accepted), fn.invites_sent ? (fn.acceptance_pct != null ? pct(fn.acceptance_pct) + " of invitations" : null) : null)}
       ${kpi("Messages sent", compact(fn.messages_sent), fn.followups_sent ? compact(fn.followups_sent) + " were follow-ups" : null)}
@@ -782,7 +948,7 @@ function renderAnalytics() {
   /* --- funnel --- */
   const funnelCard = document.createElement("div");
   funnelCard.className = "card col-5";
-  funnelCard.appendChild(cardHead("Outreach funnel", a.range?.label ?? ""));
+  funnelCard.appendChild(cardHead("From invitation to conversation", `How many people made it to each step · ${a.range?.label ?? ""}`));
   const fWrap = document.createElement("div");
   if (fn.invites_sent == null && rng.leads_replying == null) {
     fWrap.innerHTML = `<div class="empty-note">Funnel data is not available for this period.</div>`;
@@ -826,7 +992,7 @@ function renderAnalytics() {
   /* --- response performance --- */
   const respCard = document.createElement("div");
   respCard.className = "card col-7";
-  respCard.appendChild(cardHead("How fast leads get answered", "Time from a lead's reply to your team's next message"));
+  respCard.appendChild(cardHead("Response speed", "How long a lead waits between their message and your team's next one"));
   respCard.insertAdjacentHTML("beforeend", `
     <div class="kpis">
       ${kpi("Median response", dur(rng.response_median_secs), "typical case")}
@@ -860,14 +1026,17 @@ function renderAnalytics() {
   /* --- heatmap --- */
   const hmCard = document.createElement("div");
   hmCard.className = "card col-12";
-  hmCard.appendChild(cardHead("When leads reply", "Local time in India (IST) — the best windows to be online and answer"));
+  const peak = bestWindow(db.heatmap ?? []);
+  hmCard.appendChild(cardHead("When leads reply", peak
+    ? `Darker means more replies. Busiest window: ${peak.label} — that is when it pays to be at the inbox.`
+    : "Darker means more replies (times shown in IST)"));
   hmCard.appendChild(heatmap(db.heatmap ?? []));
   grid.appendChild(hmCard);
 
   /* --- senders --- */
   const sendCard = document.createElement("div");
   sendCard.className = "card col-7";
-  sendCard.appendChild(cardHead("Performance by LinkedIn profile", "Which sending profile is driving conversations"));
+  sendCard.appendChild(cardHead("Performance by LinkedIn profile", senderInsight(db.senders ?? []) || "Which sending profile is driving conversations"));
   sendCard.appendChild(senderTable(db.senders ?? []));
   grid.appendChild(sendCard);
 
@@ -908,6 +1077,22 @@ function renderAnalytics() {
   }
 
   body.appendChild(grid);
+}
+
+// plain-language insight helpers — the reader should not have to interpret the chart
+function bestWindow(cells) {
+  if (!cells.length) return null;
+  const DOW = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  const top = cells.reduce((a, b) => (b.n > a.n ? b : a), cells[0]);
+  if (!top?.n) return null;
+  return { label: `${DOW[top.dow - 1]} around ${String(top.hour).padStart(2, "0")}:00 IST (${nf(top.n)} replies)`, cell: top };
+}
+function senderInsight(senders) {
+  const withTime = senders.filter(s => s.response_avg_secs != null);
+  if (withTime.length < 2) return null;
+  const fast = withTime.reduce((a, b) => (Number(b.response_avg_secs) < Number(a.response_avg_secs) ? b : a));
+  const slow = withTime.reduce((a, b) => (Number(b.response_avg_secs) > Number(a.response_avg_secs) ? b : a));
+  return `${fast.name} answers fastest (${dur(fast.response_avg_secs)}); ${slow.name} is slowest (${dur(slow.response_avg_secs)}).`;
 }
 
 function kpi(label, value, detail) {
@@ -1185,7 +1370,7 @@ function setupClientSwitch() {
 }
 $("admin-client-switch").addEventListener("change", async (e) => {
   state.adminClientId = e.target.value;
-  state.campaign = ""; state.filter = "all"; state.analytics = null;
+  state.campaign = ""; state.filter = "all"; state.sender = ""; state.search = ""; $("search").value = ""; state.analytics = null;
   closeThread(); await load(true);
   if (state.tab === "analytics") loadAnalytics();
 });
