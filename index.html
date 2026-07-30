@@ -197,6 +197,11 @@
   .recent-item .rt{font-size:.72rem;color:var(--text-muted);flex:none;margin-left:auto}
   .hm-scale{display:flex;align-items:center;gap:6px;font-size:.74rem;color:var(--text-secondary);margin-top:8px}
   .hm-scale .sw{width:20px;height:11px;border-radius:2px}
+  .hm{display:grid;grid-template-columns:34px repeat(24,1fr);gap:2px;align-items:center}
+  .hm-day{font-size:.72rem;color:var(--text-muted);text-align:right;padding-right:6px;line-height:1}
+  .hm-cell{height:18px;border-radius:3px}
+  .hm-cell:hover{outline:2px solid var(--baseline);outline-offset:-1px}
+  .hm-hour{font-size:.68rem;color:var(--text-muted);text-align:center;line-height:1.6}
   .empty-note{color:var(--text-secondary);font-size:.86rem;padding:14px 0}
   .loading-dim{opacity:.45}
 
@@ -1051,7 +1056,7 @@ function tableToggle(build) {
   return box;
 }
 
-/* ---- reply heatmap (day × hour, sequential blue) ---- */
+/* ---- reply heatmap (day × hour, sequential blue) — HTML grid so labels keep their real size ---- */
 function heatmap(cells) {
   const wrap = document.createElement("div");
   if (!cells.length) { wrap.innerHTML = `<div class="empty-note">No replies recorded in this period.</div>`; return wrap; }
@@ -1059,23 +1064,24 @@ function heatmap(cells) {
   const grid = new Map();
   let max = 0;
   for (const c of cells) { grid.set(`${c.dow}:${c.hour}`, c.n); if (c.n > max) max = c.n; }
-  const W = 720, cellW = (W - 44) / 24, cellH = 20, H = 7 * cellH + 26;
-  const cw = document.createElement("div"); cw.className = "chart-wrap";
-  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Replies by day and hour" }, cw);
-  const tip = document.createElement("div"); tip.className = "vtip"; cw.appendChild(tip);
   const bucket = (n) => n === 0 ? -1 : Math.min(C.seq.length - 1, Math.floor((n / max) * C.seq.length * 0.999));
+
+  const cw = document.createElement("div"); cw.className = "chart-wrap";
+  const tip = document.createElement("div"); tip.className = "vtip"; cw.appendChild(tip);
+  const hm = document.createElement("div");
+  hm.className = "hm";
   for (let d = 1; d <= 7; d++) {
-    const lb = el("text", { x: 38, y: (d - 1) * cellH + 14, "text-anchor": "end", fill: C.muted, "font-size": 11 }, svg);
-    lb.textContent = DOW[d - 1];
+    const lab = document.createElement("div");
+    lab.className = "hm-day"; lab.textContent = DOW[d - 1];
+    hm.appendChild(lab);
     for (let h = 0; h < 24; h++) {
       const n = grid.get(`${d}:${h}`) ?? 0;
       const b = bucket(n);
-      const rect = el("rect", {
-        x: 44 + h * cellW + 1, y: (d - 1) * cellH + 1, width: cellW - 2, height: cellH - 2, rx: 3,
-        fill: b < 0 ? "#f4f6f8" : C.seq[b],
-      }, svg);
-      rect.style.cursor = "default";
-      rect.addEventListener("pointerenter", () => {
+      const cell = document.createElement("div");
+      cell.className = "hm-cell";
+      cell.style.background = b < 0 ? "#f4f6f8" : C.seq[b];
+      cell.dataset.n = n;
+      cell.addEventListener("pointerenter", () => {
         tip.innerHTML = "";
         const hd = document.createElement("div"); hd.className = "vt-h";
         hd.textContent = `${DOW[d - 1]} · ${String(h).padStart(2, "0")}:00–${String((h + 1) % 24).padStart(2, "0")}:00 IST`;
@@ -1083,18 +1089,24 @@ function heatmap(cells) {
         const v = document.createElement("span"); v.className = "vt-v"; v.textContent = nf(n);
         const nm = document.createElement("span"); nm.className = "vt-n"; nm.textContent = n === 1 ? "reply" : "replies";
         row.append(v, nm); tip.append(hd, row);
+        const cr = cell.getBoundingClientRect(), wr = cw.getBoundingClientRect();
         tip.style.opacity = 1;
-        const r = svg.getBoundingClientRect();
-        tip.style.left = Math.min(((44 + h * cellW) / W) * r.width + 10, r.width - 150) + "px";
-        tip.style.top = ((d - 1) * cellH / H) * r.height + 4 + "px";
+        tip.style.left = Math.min(Math.max(cr.left - wr.left - 60, 0), wr.width - 180) + "px";
+        tip.style.top = (cr.top - wr.top - 46) + "px";
       });
-      rect.addEventListener("pointerleave", () => { tip.style.opacity = 0; });
+      cell.addEventListener("pointerleave", () => { tip.style.opacity = 0; });
+      hm.appendChild(cell);
     }
   }
-  for (let h = 0; h < 24; h += 3) {
-    const lb = el("text", { x: 44 + h * cellW + cellW / 2, y: 7 * cellH + 16, "text-anchor": "middle", fill: C.muted, "font-size": 10 }, svg);
-    lb.textContent = String(h).padStart(2, "0");
+  // hour axis: blank corner + a label every 3 hours
+  const corner = document.createElement("div"); corner.className = "hm-day"; hm.appendChild(corner);
+  for (let h = 0; h < 24; h++) {
+    const t = document.createElement("div");
+    t.className = "hm-hour";
+    t.textContent = h % 3 === 0 ? String(h).padStart(2, "0") : "";
+    hm.appendChild(t);
   }
+  cw.appendChild(hm);
   wrap.appendChild(cw);
   const sc = document.createElement("div"); sc.className = "hm-scale";
   const l0 = document.createElement("span"); l0.textContent = "fewer replies"; sc.appendChild(l0);
