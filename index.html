@@ -60,6 +60,15 @@
   a{color:var(--blue)}
   .hidden{display:none!important}
 
+  /* ---------- boot ---------- */
+  #boot-view{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .boot-card{display:flex;flex-direction:column;align-items:center;gap:14px}
+  .boot-mark{opacity:.9}
+  .boot-spinner{width:26px;height:26px;border:2.5px solid #dce3ea;border-top-color:var(--blue);border-radius:50%;animation:boot-spin .8s linear infinite}
+  @keyframes boot-spin{to{transform:rotate(360deg)}}
+  .boot-text{font-size:.88rem;color:var(--muted)}
+  @media (prefers-reduced-motion: reduce){ .boot-spinner{animation-duration:2.4s} }
+
   /* ---------- login ---------- */
   #login-view{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
   .login-card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:34px;width:100%;max-width:400px}
@@ -260,8 +269,17 @@
 </head>
 <body>
 
+<!-- ======================= BOOT (shown first so a refresh never flashes the sign-in card) ======================= -->
+<div id="boot-view">
+  <div class="boot-card">
+    <svg class="boot-mark" width="26" height="26" viewBox="0 0 24 24" fill="#0a66c2"><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.86 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.56V9h3.56v11.45z"/></svg>
+    <div class="boot-spinner" aria-hidden="true"></div>
+    <div class="boot-text" id="boot-text">Loading your inbox…</div>
+  </div>
+</div>
+
 <!-- ======================= LOGIN ======================= -->
-<div id="login-view">
+<div id="login-view" class="hidden">
   <div class="login-card">
     <div class="brand-dot">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="#0a66c2"><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.86 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.56V9h3.56v11.45z"/></svg>
@@ -593,10 +611,20 @@ function clearRenderedData() {
   closeThread();
 }
 
+function showBoot(text) {
+  $("boot-text").textContent = text ?? "Loading your inbox…";
+  $("boot-view").classList.remove("hidden");
+  $("login-view").classList.add("hidden");
+  $("app-view").classList.add("hidden");
+}
+
+// Only ever reached when there is genuinely no usable session — a refresh shows the
+// boot state instead, so the sign-in card never flashes at a signed-in user.
 function showLogin(msg, isError) {
   state.appStarted = false;
   if (state.refreshTimer) { clearInterval(state.refreshTimer); state.refreshTimer = null; }
   clearRenderedData();
+  $("boot-view").classList.add("hidden");
   $("app-view").classList.add("hidden");
   $("login-view").classList.remove("hidden");
   if (msg) { const m = $("login-msg"); m.textContent = msg; m.className = "login-msg" + (isError ? " error" : ""); }
@@ -626,7 +654,7 @@ sb.auth.onAuthStateChange((_e, session) => { if (session && !state.appStarted) s
 async function startApp() {
   state.appStarted = true;
   clearRenderedData();                       // never show the previous account's rows
-  const m = $("login-msg"); m.textContent = "Signing you in…"; m.className = "login-msg";
+  showBoot("Loading your inbox…");
   try {
     try {
       await load();                          // load first, reveal after — no stale frame
@@ -635,9 +663,10 @@ async function startApp() {
       await new Promise((r) => setTimeout(r, 600));
       await load();                           // one retry absorbs a session still warming up
     }
+    $("boot-view").classList.add("hidden");
     $("login-view").classList.add("hidden");
     $("app-view").classList.remove("hidden");
-    m.textContent = "";
+    $("login-msg").textContent = "";
     if (!state.refreshTimer) state.refreshTimer = setInterval(() => { if (state.tab === "inbox") load(true); }, 120000);
   } catch (e) {
     if (e.status === 403) showLogin("This email doesn't have access to the dashboard. Ask your admin to add you.", true);
@@ -1555,9 +1584,32 @@ $("add-user-btn").addEventListener("click", async () => {
 });
 
 /* ================= boot ================= */
+// The page opens on the neutral boot state. We only fall back to the sign-in card once
+// we know there is no session to restore — a refresh must never look like a logout.
 (async () => {
-  const { data } = await sb.auth.getSession();
-  if (data?.session) startApp(); else showLogin();
+  const hash = location.hash ?? "";
+  const linkArriving = /access_token=|refresh_token=|type=magiclink|error_description=/.test(hash);
+  const hasStoredSession = (() => {
+    try { return Object.keys(localStorage).some(k => k.startsWith("sb-") && k.includes("auth-token")); }
+    catch { return false; }
+  })();
+  showBoot(linkArriving ? "Signing you in…" : "Loading your inbox…");
+
+  let { data } = await sb.auth.getSession();
+  if (!data?.session && hasStoredSession) {
+    await new Promise((r) => setTimeout(r, 400));      // storage restore still in flight
+    ({ data } = await sb.auth.getSession());
+  }
+  if (data?.session) { startApp(); return; }
+
+  if (linkArriving) {
+    // gotrue is still exchanging the link; onAuthStateChange starts the app when it lands
+    setTimeout(() => {
+      if (!state.appStarted) showLogin("That sign-in link has expired or was already used — request a new one.", true);
+    }, 6000);
+    return;
+  }
+  showLogin();
 })();
 </script>
 </body>
