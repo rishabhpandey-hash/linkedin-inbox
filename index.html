@@ -499,15 +499,15 @@ window.INBOX = {
   async setFilter(key) { if (!FILTER_DEFS.some(f => f[0] === key)) throw new Error("unknown filter"); state.filter = key; await load(true); renderChips(); return this.getState(); },
   async setSort(key) { if (!SORT_DEFS.some(s => s[0] === key)) throw new Error("unknown sort"); state.sort = key; await load(true); return this.getState(); },
   async setSender(name) { state.sender = name ?? ""; await load(true); return this.getState(); },
-  async setCampaign(id) { state.campaign = id ?? ""; $("campaign-select").value = state.campaign; closeThread(); state.analytics = null; await load(true); if (state.tab === "analytics") await loadAnalytics(); return this.getState(); },
+  async setCampaign(id) { state.campaign = id ?? ""; $("campaign-select").value = state.campaign; closeThread(); state.analytics = null; await load(true); if (state.tab === "analytics") await loadAnalytics(true); return this.getState(); },
   async search(text) { state.search = text ?? ""; $("search").value = state.search; await load(true); return this.getState(); },
   async setTab(tab) {
     const want = tab === "analytics" ? "analytics" : "inbox";
-    setTab(want);
-    if (want === "analytics" && !state.analytics) await loadAnalytics();   // resolve with data, not null
+    setTab(want);                       // may already have started the load
+    if (want === "analytics") await loadAnalytics();   // joins it; resolves with data, not null
     return this.getState();
   },
-  async setPeriod(days) { state.days = String(days); for (const x of document.querySelectorAll("#range-row .chip")) x.classList.toggle("active", x.dataset.days === state.days); await loadAnalytics(); return this.getState(); },
+  async setPeriod(days) { state.days = String(days); for (const x of document.querySelectorAll("#range-row .chip")) x.classList.toggle("active", x.dataset.days === state.days); await loadAnalytics(true); return this.getState(); },
   async openThread(id) { await openThread(id); return state.thread; },
   async sendReply(id, text) {
     if (!state.data?.user?.can_reply) throw new Error("this account cannot reply");
@@ -515,8 +515,8 @@ window.INBOX = {
     state.analytics = null; await load(true); return r;
   },
   exportCsv() { $("export-btn").click(); },
-  async refresh() { await load(true); if (state.tab === "analytics") { state.analytics = null; await loadAnalytics(); } return this.getState(); },
-  async getAnalytics(days) { if (days) state.days = String(days); await loadAnalytics(); return state.analytics; },
+  async refresh() { await load(true); if (state.tab === "analytics") { state.analytics = null; await loadAnalytics(true); } return this.getState(); },
+  async getAnalytics(days) { if (days) state.days = String(days); await loadAnalytics(true); return state.analytics; },
 };
 
 // The session can still be restoring from storage on the first paint, so give it one
@@ -914,39 +914,49 @@ $("campaign-select").addEventListener("change", async (e) => {
   closeThread();
   await load(true);
   state.analytics = null;
-  if (state.tab === "analytics") loadAnalytics();
+  if (state.tab === "analytics") loadAnalytics(true);
 });
 $("refresh-btn").addEventListener("click", async () => {
   const b = $("refresh-btn"); b.disabled = true; const old = b.textContent; b.textContent = "Refreshing…";
   const t0 = Date.now();
-  try { await load(true); if (state.tab === "analytics") { state.analytics = null; await loadAnalytics(); } } catch {}
+  try { await load(true); if (state.tab === "analytics") { state.analytics = null; await loadAnalytics(true); } } catch {}
   setTimeout(() => { b.disabled = false; b.textContent = old; }, Math.max(0, 450 - (Date.now() - t0)));
 });
 for (const b of document.querySelectorAll("#range-row .chip")) {
   b.addEventListener("click", () => {
     state.days = b.dataset.days;
     for (const x of document.querySelectorAll("#range-row .chip")) x.classList.toggle("active", x === b);
-    loadAnalytics();
+    loadAnalytics(true);
   });
 }
 
 /* ================= analytics ================= */
-async function loadAnalytics() {
+// Returns the in-flight promise when one exists, so a second caller (an agent, a tab
+// switch) awaits the same load instead of resolving early with no data.
+let analyticsInFlight = null;
+function loadAnalytics(force) {
+  // join an existing load, unless the period/campaign changed — then queue a fresh one
+  if (analyticsInFlight) return force ? analyticsInFlight.then(() => loadAnalytics(true)) : analyticsInFlight;
   const body = $("analytics-body");
-  if (state.anLoading) return;
   state.anLoading = true;
   if (state.analytics) body.classList.add("loading-dim");
   else body.innerHTML = `<div class="card col-12"><div class="empty-note">Loading analytics…</div></div>`;
-  try {
-    const qs = new URLSearchParams({ days: state.days });
-    if (state.campaign) qs.set("campaign_id", state.campaign);
-    state.analytics = await api("/api/analytics?" + qs.toString());
-    renderAnalytics();
-  } catch (e) {
-    body.innerHTML = `<div class="card col-12"><div class="empty-note">Could not load analytics: ${esc(e.body?.detail ?? e.message)}</div></div>`;
-  } finally {
-    state.anLoading = false; body.classList.remove("loading-dim"); mirror();
-  }
+  analyticsInFlight = (async () => {
+    try {
+      const qs = new URLSearchParams({ days: state.days });
+      if (state.campaign) qs.set("campaign_id", state.campaign);
+      state.analytics = await api("/api/analytics?" + qs.toString());
+      renderAnalytics();
+      return state.analytics;
+    } catch (e) {
+      body.innerHTML = `<div class="card col-12"><div class="empty-note">Could not load analytics: ${esc(e.body?.detail ?? e.message)}</div></div>`;
+      return null;
+    } finally {
+      state.anLoading = false; body.classList.remove("loading-dim"); mirror();
+      analyticsInFlight = null;
+    }
+  })();
+  return analyticsInFlight;
 }
 
 function renderAnalytics() {
@@ -1425,7 +1435,7 @@ $("admin-client-switch").addEventListener("change", async (e) => {
   state.adminClientId = e.target.value;
   state.campaign = ""; state.filter = "all"; state.sender = ""; state.search = ""; $("search").value = ""; state.analytics = null;
   closeThread(); await load(true);
-  if (state.tab === "analytics") loadAnalytics();
+  if (state.tab === "analytics") loadAnalytics(true);
 });
 $("admin-btn").addEventListener("click", async () => { $("admin-overlay").classList.remove("hidden"); await refreshAdmin(); });
 $("admin-close").addEventListener("click", () => $("admin-overlay").classList.add("hidden"));
