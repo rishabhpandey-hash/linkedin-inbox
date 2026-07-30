@@ -661,21 +661,21 @@ $("tab-inbox").addEventListener("click", () => setTab("inbox"));
 $("tab-analytics").addEventListener("click", () => setTab("analytics"));
 
 /* ================= inbox: stats/chips/list ================= */
+// Inbox tiles describe the inbox only. Campaign volumes (leads, invitations, messages)
+// live in Analytics, where they come from one source and cannot contradict these.
 function renderStats() {
   const wrap = $("stats"); wrap.innerHTML = "";
-  const camps = state.campaign ? state.data.campaigns.filter(c => c.id === state.campaign) : state.data.campaigns;
-  const sum = (k) => { let any = false, t = 0; for (const c of camps) { const v = c.stats?.[k]; if (v !== null && v !== undefined) { any = true; t += Number(v); } } return any ? t : null; };
-  const counts = state.data.counts ?? { all: state.data.conversations.length, needs_reply: 0 };
+  const c = state.data.counts ?? {};
   const tiles = [
-    ["Leads in campaign", sum("member_count")],
-    ["Messages sent", sum("message_sent_count")],
-    ["Conversations", counts.all],
-    ["Awaiting your reply", counts.needs_reply],
+    ["Conversations", c.all, "leads who have replied at least once"],
+    ["Awaiting your reply", c.needs_reply, "the lead spoke last"],
+    ["Waiting 48h+", c.waiting_48, "overdue"],
+    ["In conversation", c.engaged, "active back-and-forth"],
   ];
-  for (const [label, val] of tiles) {
-    if (val === null) continue;
+  for (const [label, val, hint] of tiles) {
+    if (val === null || val === undefined) continue;
     const d = document.createElement("div");
-    d.className = "tile"; d.dataset.stat = label;
+    d.className = "tile"; d.dataset.stat = label; d.title = hint;
     d.innerHTML = `<div class="n">${nf(val)}</div><div class="l">${label}</div>`;
     wrap.appendChild(d);
   }
