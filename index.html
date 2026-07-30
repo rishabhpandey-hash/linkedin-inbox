@@ -501,7 +501,12 @@ window.INBOX = {
   async setSender(name) { state.sender = name ?? ""; await load(true); return this.getState(); },
   async setCampaign(id) { state.campaign = id ?? ""; $("campaign-select").value = state.campaign; closeThread(); state.analytics = null; await load(true); if (state.tab === "analytics") await loadAnalytics(); return this.getState(); },
   async search(text) { state.search = text ?? ""; $("search").value = state.search; await load(true); return this.getState(); },
-  setTab(tab) { setTab(tab === "analytics" ? "analytics" : "inbox"); return this.getState(); },
+  async setTab(tab) {
+    const want = tab === "analytics" ? "analytics" : "inbox";
+    setTab(want);
+    if (want === "analytics" && !state.analytics) await loadAnalytics();   // resolve with data, not null
+    return this.getState();
+  },
   async setPeriod(days) { state.days = String(days); for (const x of document.querySelectorAll("#range-row .chip")) x.classList.toggle("active", x.dataset.days === state.days); await loadAnalytics(); return this.getState(); },
   async openThread(id) { await openThread(id); return state.thread; },
   async sendReply(id, text) {
@@ -564,9 +569,25 @@ function el(tag, attrs = {}, parent) {
 }
 
 /* ================= login ================= */
+// Wipe every rendered trace of the previous account — the next person to use this
+// browser must not see the last client's leads or numbers.
+function clearRenderedData() {
+  for (const id of ["conv-list", "stats", "chips", "msgs", "analytics-body"]) {
+    const el = $(id); if (el) el.innerHTML = "";
+  }
+  $("client-logo").innerHTML = "";
+  $("client-name").textContent = "";
+  $("who").textContent = "";
+  $("campaign-select").innerHTML = '<option value="">All campaigns</option>';
+  $("sender-select").innerHTML = '<option value="">All profiles</option>';
+  $("inbox-data").textContent = "{}";
+  closeThread();
+}
+
 function showLogin(msg, isError) {
   state.appStarted = false;
   if (state.refreshTimer) { clearInterval(state.refreshTimer); state.refreshTimer = null; }
+  clearRenderedData();
   $("app-view").classList.add("hidden");
   $("login-view").classList.remove("hidden");
   if (msg) { const m = $("login-msg"); m.textContent = msg; m.className = "login-msg" + (isError ? " error" : ""); }
@@ -583,7 +604,8 @@ $("login-btn").addEventListener("click", async () => {
 });
 $("logout-btn").addEventListener("click", async () => {
   await sb.auth.signOut();
-  Object.assign(state, { data: null, filter: "all", search: "", campaign: "", sender: "", sort: "recent", thread: null, adminClientId: "", admin: null, tab: "inbox", analytics: null });
+  Object.assign(state, { data: null, filter: "all", search: "", campaign: "", sender: "", sort: "recent", thread: null, adminClientId: "", admin: null, tab: "inbox", days: "30", analytics: null });
+  for (const x of document.querySelectorAll("#range-row .chip")) x.classList.toggle("active", x.dataset.days === "30");
   $("search").value = ""; $("admin-btn").classList.add("hidden");
   $("admin-client-switch").classList.add("hidden"); $("admin-overlay").classList.add("hidden");
   document.body.classList.remove("thread-open"); closeThread(); setTab("inbox");
@@ -594,10 +616,13 @@ sb.auth.onAuthStateChange((_e, session) => { if (session && !state.appStarted) s
 /* ================= app ================= */
 async function startApp() {
   state.appStarted = true;
-  $("login-view").classList.add("hidden");
-  $("app-view").classList.remove("hidden");
+  clearRenderedData();                       // never show the previous account's rows
+  const m = $("login-msg"); m.textContent = "Signing you in…"; m.className = "login-msg";
   try {
-    await load();
+    await load();                            // load first, reveal after — no stale frame
+    $("login-view").classList.add("hidden");
+    $("app-view").classList.remove("hidden");
+    m.textContent = "";
     if (!state.refreshTimer) state.refreshTimer = setInterval(() => { if (state.tab === "inbox") load(true); }, 120000);
   } catch (e) {
     if (e.status === 403) showLogin("This email doesn't have access to the dashboard. Ask your admin to add you.", true);
@@ -688,7 +713,9 @@ function renderChips() {
   const wrap = $("chips"); wrap.innerHTML = "";
   for (const [key, label, hint] of FILTER_DEFS) {
     const count = counts[key];
-    if (key !== "all" && !count) continue;               // hide filters with nothing in them
+    // hide empty filters, but never hide the one that is currently applied — otherwise no
+    // chip looks active and an empty list has no visible explanation
+    if (key !== "all" && !count && state.filter !== key) continue;
     const b = document.createElement("button");
     b.className = "chip" + (state.filter === key ? " active" : "");
     b.dataset.filter = key;
@@ -730,7 +757,8 @@ function renderList() {
   if (total > rows.length) {
     const note = document.createElement("div");
     note.style.cssText = "padding:8px 13px;font-size:.75rem;color:var(--muted);background:#fbfcfd;border-bottom:1px solid var(--line)";
-    note.textContent = `Showing the ${nf(rows.length)} most recent of ${nf(total)} — use the filters or search to narrow down.`;
+    const how = state.sort === "oldest_waiting" ? "longest-waiting" : state.sort === "most_replies" ? "most-replied" : "most recent";
+    note.textContent = `Showing the ${how} ${nf(rows.length)} of ${nf(total)} — use the filters or search to narrow down.`;
     wrap.appendChild(note);
   }
   for (const cv of rows) {
@@ -746,7 +774,7 @@ function renderList() {
     const wh = cv.waiting_hours;
     const await_ = cv.last_direction !== "REPLY" ? ""
       : wh != null && wh >= 48
-        ? `<span class="badge wait">Waiting ${wh >= 48 ? Math.round(wh / 24) + " days" : wh + "h"}</span>`
+        ? `<span class="badge wait">Waiting ${Math.round(wh / 24)} days</span>`
         : `<span class="badge await">Awaiting your reply</span>`;
     const campBadge = !state.campaign && state.data.campaigns.length > 1 ? `<span class="badge camp">${esc(shorten(campName(cv.campaign_id), 30))}</span>` : "";
     div.innerHTML = `
@@ -787,8 +815,10 @@ function renderThread() {
   $("thread-placeholder").classList.add("hidden");
   $("thread-content").classList.remove("hidden");
   $("th-avatar").innerHTML = cv.profile?.image ? `<img src="${esc(cv.profile.image)}" alt="" onerror="this.remove()">` : initials(cv.profile?.name);
-  $("th-name").innerHTML = cv.profile?.profile_url
-    ? `<a href="${esc(cv.profile.profile_url)}" target="_blank" rel="noopener">${esc(cv.profile?.name ?? "")}</a>`
+  // only ever link out to an https LinkedIn URL — this value comes from scraped profile data
+  const safeUrl = /^https:\/\/([a-z0-9-]+\.)*linkedin\.com\//i.test(cv.profile?.profile_url ?? "") ? cv.profile.profile_url : null;
+  $("th-name").innerHTML = safeUrl
+    ? `<a href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer">${esc(cv.profile?.name ?? "")}</a>`
     : esc(cv.profile?.name ?? "");
   $("th-sub").textContent = [cv.profile?.occupation, campaign?.name, "via " + (cv.sender_name ?? "?")].filter(Boolean).join("  ·  ");
   const box = $("msgs"); box.innerHTML = "";
@@ -846,6 +876,9 @@ $("export-btn").addEventListener("click", async () => {
     const u = new URL(API + "/api/export");
     u.searchParams.set("format", "csv");
     u.searchParams.set("filter", state.filter);
+    u.searchParams.set("sort", state.sort);                      // export what is on screen,
+    if (state.search.trim()) u.searchParams.set("q", state.search.trim());  // search and
+    if (state.sender) u.searchParams.set("sender", state.sender);            // sender included
     if (state.campaign) u.searchParams.set("campaign_id", state.campaign);
     if (state.adminClientId) u.searchParams.set("client_id", state.adminClientId);
     const res = await fetch(u, { headers: { Authorization: "Bearer " + t } });
@@ -860,7 +893,10 @@ $("export-btn").addEventListener("click", async () => {
   finally { b.disabled = false; b.textContent = old; }
 });
 $("campaign-select").addEventListener("change", async (e) => {
-  state.campaign = e.target.value; closeThread();
+  // reset the narrowing filters: they belong to the campaign you were just looking at
+  state.campaign = e.target.value;
+  state.filter = "all"; state.sender = ""; state.search = ""; $("search").value = "";
+  closeThread();
   await load(true);
   state.analytics = null;
   if (state.tab === "analytics") loadAnalytics();
@@ -1071,7 +1107,8 @@ function renderAnalytics() {
   if ((db.campaigns ?? []).length > 1) {
     const cCard = document.createElement("div");
     cCard.className = "card col-12";
-    cCard.appendChild(cardHead("Campaign comparison", "All time totals from Konnector, conversations from your inbox"));
+    cCard.appendChild(cardHead("Campaign comparison",
+      `Messages, replies and reply rate cover ${a.range?.label ?? "the selected period"}. Leads is the campaign's total size; conversations and waiting are live counts from your inbox.`));
     cCard.appendChild(campaignTable(db.campaigns ?? [], fn.per_campaign ?? []));
     grid.appendChild(cCard);
   }
@@ -1334,16 +1371,17 @@ function senderTable(rows) {
 function campaignTable(rows, perCampaign) {
   const wrap = document.createElement("div");
   const t = document.createElement("table"); t.className = "an-table";
-  t.innerHTML = `<thead><tr><th>Campaign</th><th>Status</th><th>Leads</th><th>Messages sent</th><th>Replies</th><th>Reply rate</th><th>Conversations</th><th>Waiting</th></tr></thead>`;
+  t.innerHTML = `<thead><tr><th>Campaign</th><th>Status</th><th>Leads (total)</th><th>Messages sent</th><th>Replies</th><th>Reply rate</th><th>Conversations</th><th>Waiting</th></tr></thead>`;
   const tb = document.createElement("tbody");
   for (const r of rows) {
-    const kn = perCampaign.find(p => p.routine_num_id === r.routine_num_id) ?? {};
+    // match strictly on a known numeric id — two campaigns with a null id are not "the same"
+    const kn = (r.routine_num_id != null ? perCampaign.find(p => p.routine_num_id === r.routine_num_id) : null) ?? {};
     const tr = document.createElement("tr");
     const cells = [
       [r.name ?? "—", true],
       [r.status ?? "—", true],
       [nf(r.stats?.member_count), false],
-      [nf(kn.messages_sent ?? r.stats?.message_sent_count), false],
+      [nf(kn.messages_sent), false],          // period figure only — never mixed with lifetime
       [nf(kn.replies), false],
       [kn.reply_pct != null ? pct(kn.reply_pct) : "—", false],
       [nf(r.conversations), false],
@@ -1398,7 +1436,10 @@ async function refreshAdmin() {
     $("admin-available").querySelector("tbody").innerHTML = (ov.available_campaigns ?? []).filter(a => a.encrypted_id).map((a, i) => `
       <tr><td>${esc(a.name)}</td>
       <td><select data-mapsel="${i}">${clientOpts}</select></td>
-      <td><button class="mini go" data-map="${i}">Map</button></td></tr>`).join("") || `<tr><td colspan="3" style="color:var(--muted)">All Konnector campaigns are mapped.</td></tr>`;
+      <td><button class="mini go" data-map="${i}">Map</button></td></tr>`).join("") ||
+      (ov.available_error
+        ? `<tr><td colspan="3" style="color:var(--red)">Could not reach Konnector to list campaigns: ${esc(ov.available_error)}</td></tr>`
+        : `<tr><td colspan="3" style="color:var(--muted)">All Konnector campaigns are mapped.</td></tr>`);
     $("admin-users").querySelector("tbody").innerHTML = ov.users.map(u => `
       <tr><td>${esc(u.email)}${u.is_admin ? ' <span class="badge camp">admin</span>' : ""}</td>
       <td>${esc(cname(u.client_id))}</td><td>${u.can_reply ? "yes" : "view only"}</td>
@@ -1431,15 +1472,37 @@ async function refreshAdmin() {
     }));
   } catch (e) { adminMsg("Could not load admin data: " + e.message, true); }
 }
+// Pre-fill from the user that is already on file, so editing one setting can never
+// silently widen their campaign access.
+function existingUser() {
+  const email = $("new-user-email").value.trim().toLowerCase();
+  if (!email) return null;
+  return (state.admin?.users ?? []).find(u => u.email === email) ?? null;
+}
 function renderAdminCampChecks() {
   const clientId = $("new-user-client").value;
   const box = $("admin-camp-checks");
+  const existing = existingUser();
+  const current = existing?.campaign_ids ?? null;
   const camps = (state.admin?.campaigns ?? []).filter(c => c.client_id === clientId);
   if (!camps.length) { box.innerHTML = '<em style="color:var(--muted)">This client has no campaigns yet — the user will see all future ones.</em>'; return; }
-  box.innerHTML = '<em style="color:var(--muted)">Campaign access (none ticked = all campaigns):</em>' +
-    camps.map(c => `<label><input type="checkbox" value="${c.id}" class="camp-check"> ${esc(c.name)}</label>`).join("");
+  const note = existing
+    ? `<em style="color:var(--blue)">Editing ${esc(existing.email)} — ticks below are their current access.</em>`
+    : '<em style="color:var(--muted)">Campaign access (none ticked = all campaigns):</em>';
+  box.innerHTML = note + camps.map(c =>
+    `<label><input type="checkbox" value="${c.id}" class="camp-check"${current && current.includes(c.id) ? " checked" : ""}> ${esc(c.name)}</label>`).join("");
+}
+function syncAdminUserForm() {
+  const existing = existingUser();
+  if (existing) {
+    $("new-user-client").value = existing.client_id;
+    $("new-user-reply").checked = !!existing.can_reply;
+  }
+  renderAdminCampChecks();
 }
 $("new-user-client").addEventListener("change", renderAdminCampChecks);
+$("new-user-email").addEventListener("change", syncAdminUserForm);
+$("new-user-email").addEventListener("blur", syncAdminUserForm);
 $("add-client-btn").addEventListener("click", async () => {
   const name = $("new-client-name").value.trim();
   if (!name) return adminMsg("Enter a client name.", true);
@@ -1456,9 +1519,12 @@ $("add-user-btn").addEventListener("click", async () => {
   const clientId = $("new-user-client").value;
   if (!email || !email.includes("@")) return adminMsg("Enter a valid email.", true);
   const campaignIds = [...document.querySelectorAll(".camp-check:checked")].map(c => c.value);
+  const boxes = document.querySelectorAll(".camp-check").length;
+  if (boxes && !campaignIds.length && !confirm(`No campaigns are ticked, so ${email} will be able to see ALL of this client's campaigns. Continue?`)) return;
   try {
     await api("/api/admin/users", { method: "POST", body: JSON.stringify({ email, client_id: clientId, can_reply: $("new-user-reply").checked, campaign_ids: campaignIds }) });
-    $("new-user-email").value = ""; adminMsg("User saved. They can now sign in with " + email + ".");
+    $("new-user-email").value = "";
+    adminMsg(`Saved ${email} — ${campaignIds.length ? campaignIds.length + " campaign(s)" : "all campaigns"}, ${$("new-user-reply").checked ? "can reply" : "view only"}.`);
     await refreshAdmin();
   } catch (e) { adminMsg("Save failed: " + e.message, true); }
 });
