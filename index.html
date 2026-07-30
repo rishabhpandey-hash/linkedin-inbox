@@ -1075,11 +1075,11 @@ function renderAnalytics() {
   heroCard.innerHTML = `
     <div class="hero">
       <span class="fig" data-hero="lead_replies">${compact(rng.lead_replies ?? 0)}</span>
-      <span class="cap">replies received from leads · ${esc(a.range?.label ?? "")}<br>
+      <span class="cap">replies received from leads · ${esc(a.range?.label ?? "")}${state.anSender ? " · sent from " + esc(state.anSender) : ""}<br>
         across ${nf(rng.leads_replying ?? 0)} people · ${nf(live.conversations ?? 0)} conversations tracked in total</span>
     </div>
     <div class="kpis" style="margin-top:16px">
-      ${kpi("Leads in campaigns", compact(a.leads_in_campaigns), "people targeted in total")}
+      ${state.anSender ? "" : kpi("Leads in campaigns", compact(a.leads_in_campaigns), "people targeted in total")}
       ${kpi("Invitations sent", compact(fn.invites_sent), fn.invites_sent ? null : "none in this period")}
       ${kpi("Connections accepted", compact(fn.invites_accepted), fn.invites_sent ? (fn.acceptance_pct != null ? pct(fn.acceptance_pct) + " of invitations" : null) : null)}
       ${kpi("Messages sent", compact(fn.messages_sent), fn.followups_sent ? compact(fn.followups_sent) + " were follow-ups" : null)}
