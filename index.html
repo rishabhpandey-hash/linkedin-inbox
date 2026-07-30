@@ -168,6 +168,8 @@
   #analytics-view{flex:1;overflow-y:auto;padding:14px 18px 40px}
   #range-row{display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
   #range-row .lbl{font-size:.78rem;color:var(--muted);font-weight:600;margin-right:2px}
+  #range-row select{padding:5px 9px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:.8rem;max-width:230px}
+  #range-row select:not([value=""]){color:var(--text)}
   .an-grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}
   .card{background:var(--surface-1);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px 18px;min-width:0}
   .card h3{margin:0;font-size:.95rem}
@@ -369,9 +371,13 @@
       <button class="chip active" data-days="30">30 days</button>
       <button class="chip" data-days="90">90 days</button>
       <button class="chip" data-days="all">All time</button>
+      <span class="lbl" style="margin-left:10px">Campaign</span>
+      <select id="an-campaign" data-role="analytics-campaign" aria-label="Filter analytics by campaign"><option value="">All campaigns</option></select>
+      <span class="lbl">Sent from</span>
+      <select id="an-sender" data-role="analytics-sender" aria-label="Filter analytics by LinkedIn profile"><option value="">All LinkedIn profiles</option></select>
       <span id="range-note" style="font-size:.76rem;color:var(--text-muted)"></span>
       <span style="flex:1"></span>
-      <span style="font-size:.74rem;color:var(--text-muted)">Everything below follows this period, except tiles marked “right now”.</span>
+      <span style="font-size:.74rem;color:var(--text-muted)">Everything below follows these filters, except tiles marked “right now”.</span>
     </div>
     <div id="analytics-body"></div>
   </div>
@@ -430,7 +436,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   data: null, filter: "all", search: "", campaign: "", sender: "", sort: "recent", thread: null,
   adminClientId: "", appStarted: false, refreshTimer: null, admin: null,
-  tab: "inbox", days: "30", analytics: null, anLoading: false,
+  tab: "inbox", days: "30", anSender: "", analytics: null, anLoading: false,
 };
 
 // filter key -> label + one-line meaning (also surfaced to agents via INBOX.describe())
@@ -467,7 +473,7 @@ function mirror() {
       applied: {
         campaign_id: state.campaign, campaign_name: d ? campName(state.campaign) : "",
         filter: state.filter, sort: state.sort, sender: state.sender, search: state.search,
-        analytics_period_days: state.days,
+        analytics_period_days: state.days, analytics_sender: state.anSender,
       },
       counts: d?.counts ?? null,
       total_matching: d?.total_matching ?? null,
@@ -505,6 +511,7 @@ window.INBOX = {
         "search(text)": "server-side search over name, company, headline, message text and sender",
         "setTab('inbox'|'analytics')": "switch view",
         "setPeriod('7'|'30'|'90'|'all')": "analytics period",
+        "setAnalyticsSender(name|'')": "scope analytics to one LinkedIn sending profile",
         "openThread(id)": "open a conversation and return its messages",
         "sendReply(id, text)": "send a REAL LinkedIn message — requires can_reply",
         "exportCsv()": "download the current list as CSV",
@@ -526,6 +533,7 @@ window.INBOX = {
     return this.getState();
   },
   async setPeriod(days) { state.days = String(days); for (const x of document.querySelectorAll("#range-row .chip")) x.classList.toggle("active", x.dataset.days === state.days); await loadAnalytics(true); return this.getState(); },
+  async setAnalyticsSender(name) { state.anSender = name ?? ""; await loadAnalytics(true); return this.getState(); },
   async openThread(id) { await openThread(id); return state.thread; },
   async sendReply(id, text) {
     if (!state.data?.user?.can_reply) throw new Error("this account cannot reply");
@@ -641,7 +649,7 @@ $("login-btn").addEventListener("click", async () => {
 });
 $("logout-btn").addEventListener("click", async () => {
   await sb.auth.signOut();
-  Object.assign(state, { data: null, filter: "all", search: "", campaign: "", sender: "", sort: "recent", thread: null, adminClientId: "", admin: null, tab: "inbox", days: "30", analytics: null });
+  Object.assign(state, { data: null, filter: "all", search: "", campaign: "", sender: "", sort: "recent", thread: null, adminClientId: "", admin: null, tab: "inbox", days: "30", anSender: "", analytics: null });
   for (const x of document.querySelectorAll("#range-row .chip")) x.classList.toggle("active", x.dataset.days === "30");
   $("search").value = ""; $("admin-btn").classList.add("hidden");
   $("admin-client-switch").classList.add("hidden"); $("admin-overlay").classList.add("hidden");
@@ -940,6 +948,7 @@ $("campaign-select").addEventListener("change", async (e) => {
   // reset the narrowing filters: they belong to the campaign you were just looking at
   state.campaign = e.target.value;
   state.filter = "all"; state.sender = ""; state.search = ""; $("search").value = "";
+  state.anSender = "";                       // sender options differ per campaign
   closeThread();
   await load(true);
   state.analytics = null;
@@ -958,6 +967,21 @@ for (const b of document.querySelectorAll("#range-row .chip")) {
     loadAnalytics(true);
   });
 }
+// analytics filters: campaign mirrors the header picker (and rescopes the inbox too),
+// sender applies to analytics only
+$("an-campaign").addEventListener("change", async (e) => {
+  state.campaign = e.target.value;
+  $("campaign-select").value = state.campaign;
+  state.anSender = "";
+  state.filter = "all"; state.sender = ""; state.search = ""; $("search").value = "";
+  closeThread();
+  try { await load(true); } catch (err) { console.error(err); }
+  await loadAnalytics(true);
+});
+$("an-sender").addEventListener("change", async (e) => {
+  state.anSender = e.target.value;
+  await loadAnalytics(true);
+});
 
 /* ================= analytics ================= */
 // Returns the in-flight promise when one exists, so a second caller (an agent, a tab
@@ -974,6 +998,7 @@ function loadAnalytics(force) {
     try {
       const qs = new URLSearchParams({ days: state.days });
       if (state.campaign) qs.set("campaign_id", state.campaign);
+      if (state.anSender) qs.set("sender", state.anSender);
       state.analytics = await api("/api/analytics?" + qs.toString());
       renderAnalytics();
       return state.analytics;
@@ -988,10 +1013,40 @@ function loadAnalytics(force) {
   return analyticsInFlight;
 }
 
+function renderAnalyticsFilters() {
+  const a = state.analytics;
+  // campaign picker mirrors the header selector so both stay in step
+  const cs = $("an-campaign");
+  cs.innerHTML = '<option value="">All campaigns</option>';
+  for (const c of state.data?.campaigns ?? []) {
+    const o = document.createElement("option");
+    o.value = c.id; o.textContent = c.name;
+    cs.appendChild(o);
+  }
+  cs.value = state.campaign;
+  cs.classList.toggle("hidden", (state.data?.campaigns ?? []).length < 2);
+
+  const ss = $("an-sender");
+  const opts = a?.db?.sender_options ?? [];
+  ss.innerHTML = `<option value="">All LinkedIn profiles${opts.length ? " (" + opts.length + ")" : ""}</option>`;
+  for (const s of opts) {
+    const o = document.createElement("option");
+    o.value = s.name; o.textContent = `${s.name} · ${s.n}`;
+    ss.appendChild(o);
+  }
+  ss.value = opts.some(o => o.name === state.anSender) ? state.anSender : "";
+  state.anSender = ss.value;
+  ss.classList.toggle("hidden", opts.length < 2);
+}
+
 function renderAnalytics() {
   const a = state.analytics, body = $("analytics-body");
   const db = a.db ?? {}, live = db.live ?? {}, rng = db.range ?? {}, fn = a.funnel ?? {};
-  $("range-note").textContent = a.range?.label ? `· ${a.range.label}` + (state.campaign ? " · 1 campaign" : ` · ${a.campaigns.length} campaign${a.campaigns.length === 1 ? "" : "s"}`) : "";
+  renderAnalyticsFilters();
+  const scopeBits = [a.range?.label];
+  scopeBits.push(state.campaign ? campName(state.campaign) : `${a.campaigns.length} campaign${a.campaigns.length === 1 ? "" : "s"}`);
+  if (state.anSender) scopeBits.push("sent from " + state.anSender);
+  $("range-note").textContent = "· " + scopeBits.filter(Boolean).join(" · ");
   body.innerHTML = "";
   const grid = document.createElement("div");
   grid.className = "an-grid";
@@ -1161,9 +1216,13 @@ function renderAnalytics() {
   if ((db.campaigns ?? []).length > 1) {
     const cCard = document.createElement("div");
     cCard.className = "card col-12";
-    cCard.appendChild(cardHead("Campaign comparison",
-      `Messages, replies and reply rate cover ${a.range?.label ?? "the selected period"}. Leads is the campaign's total size; conversations and waiting are live counts from your inbox.`));
-    cCard.appendChild(campaignTable(db.campaigns ?? [], fn.per_campaign ?? []));
+    // Konnector cannot split its per-campaign volumes by sender, so drop those columns
+    // rather than show campaign-wide numbers under a per-sender heading
+    const volumesOk = a.sender_scoped_volumes !== false && !state.anSender;
+    cCard.appendChild(cardHead("Campaign comparison", volumesOk
+      ? `Messages, replies and reply rate cover ${a.range?.label ?? "the selected period"}. Leads is the campaign's total size; conversations and waiting are live counts from your inbox.`
+      : `Filtered to ${state.anSender}. Message volumes per campaign are not available per profile, so only their conversations are shown here — clear the profile filter to see volumes.`));
+    cCard.appendChild(campaignTable(db.campaigns ?? [], fn.per_campaign ?? [], volumesOk));
     grid.appendChild(cCard);
   }
 
@@ -1422,10 +1481,10 @@ function senderTable(rows) {
 }
 
 /* ---- campaign comparison ---- */
-function campaignTable(rows, perCampaign) {
+function campaignTable(rows, perCampaign, volumesOk = true) {
   const wrap = document.createElement("div");
   const t = document.createElement("table"); t.className = "an-table";
-  t.innerHTML = `<thead><tr><th>Campaign</th><th>Status</th><th>Leads (total)</th><th>Messages sent</th><th>Replies</th><th>Reply rate</th><th>Conversations</th><th>Waiting</th></tr></thead>`;
+  t.innerHTML = `<thead><tr><th>Campaign</th><th>Status</th><th>Leads (total)</th>${volumesOk ? "<th>Messages sent</th><th>Replies</th><th>Reply rate</th>" : ""}<th>Conversations</th><th>Waiting</th></tr></thead>`;
   const tb = document.createElement("tbody");
   for (const r of rows) {
     // match strictly on a known numeric id — two campaigns with a null id are not "the same"
@@ -1435,9 +1494,11 @@ function campaignTable(rows, perCampaign) {
       [r.name ?? "—", true],
       [r.status ?? "—", true],
       [nf(r.stats?.member_count), false],
-      [nf(kn.messages_sent), false],          // period figure only — never mixed with lifetime
-      [nf(kn.replies), false],
-      [kn.reply_pct != null ? pct(kn.reply_pct) : "—", false],
+      ...(volumesOk ? [
+        [nf(kn.messages_sent), false],        // period figure only — never mixed with lifetime
+        [nf(kn.replies), false],
+        [kn.reply_pct != null ? pct(kn.reply_pct) : "—", false],
+      ] : []),
       [nf(r.conversations), false],
       [nf(r.awaiting), false],
     ];
@@ -1462,7 +1523,7 @@ function setupClientSwitch() {
 }
 $("admin-client-switch").addEventListener("change", async (e) => {
   state.adminClientId = e.target.value;
-  state.campaign = ""; state.filter = "all"; state.sender = ""; state.search = ""; $("search").value = ""; state.analytics = null;
+  state.campaign = ""; state.filter = "all"; state.sender = ""; state.anSender = ""; state.search = ""; $("search").value = ""; state.analytics = null;
   closeThread(); await load(true);
   if (state.tab === "analytics") loadAnalytics(true);
 });
