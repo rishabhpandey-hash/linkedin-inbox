@@ -764,11 +764,12 @@ function renderAnalytics() {
         across ${nf(rng.leads_replying ?? 0)} people · ${nf(live.conversations ?? 0)} conversations tracked in total</span>
     </div>
     <div class="kpis" style="margin-top:16px">
-      ${kpi("Invitations sent", compact(fn.invites_sent), null)}
-      ${kpi("Connections accepted", compact(fn.invites_accepted), fn.acceptance_pct != null ? pct(fn.acceptance_pct) + " acceptance" : null)}
-      ${kpi("Messages sent", compact(fn.messages_sent), fn.followups_sent != null ? compact(fn.followups_sent) + " follow-ups" : null)}
-      ${kpi("Leads who replied", compact(fn.lead_replies), fn.message_reply_pct != null ? pct(fn.message_reply_pct) + " of messages" : null)}
-      ${kpi("Profile visits", compact(fn.profile_visits), "warm-up activity")}
+      ${kpi("Invitations sent", compact(fn.invites_sent), fn.invites_sent ? null : "none in this period")}
+      ${kpi("Connections accepted", compact(fn.invites_accepted), fn.invites_sent ? (fn.acceptance_pct != null ? pct(fn.acceptance_pct) + " of invitations" : null) : null)}
+      ${kpi("Messages sent", compact(fn.messages_sent), fn.followups_sent ? compact(fn.followups_sent) + " were follow-ups" : null)}
+      ${kpi("Reply rate", fn.message_reply_pct != null ? pct(fn.message_reply_pct) : "—", "of messages got a reply")}
+      ${kpi("People who replied", nf(rng.leads_replying ?? 0), "in this period")}
+      ${kpi("In conversation now", nf(live.engaged ?? 0), "back-and-forth going")}
       ${kpi("Awaiting your reply", nf(live.awaiting ?? 0), "right now")}
     </div>`;
   grid.appendChild(heroCard);
@@ -778,14 +779,13 @@ function renderAnalytics() {
   funnelCard.className = "card col-5";
   funnelCard.appendChild(cardHead("Outreach funnel", a.range?.label ?? ""));
   const fWrap = document.createElement("div");
-  if (fn.invites_sent == null) {
+  if (fn.invites_sent == null && rng.leads_replying == null) {
     fWrap.innerHTML = `<div class="empty-note">Funnel data is not available for this period.</div>`;
   } else {
     const stages = [
       ["Invitations sent", fn.invites_sent],
       ["Connections accepted", fn.invites_accepted],
-      ["Leads who replied", fn.lead_replies],
-      ["Still talking now", live.engaged],
+      ["People who replied", rng.leads_replying],
     ].filter(s => s[1] != null);
     const max = Math.max(...stages.map(s => Number(s[1]) || 0), 1);
     stages.forEach(([label, val], i) => {
@@ -797,15 +797,23 @@ function renderAnalytics() {
         <span class="ft"><span class="funnel-bar" style="display:block;width:${w}%;background:${C.ordinal[Math.min(i, C.ordinal.length - 1)]}"></span></span>
         <span class="fv">${nf(val)}</span>`;
       fWrap.appendChild(row);
+      // only label a conversion when the stages really are a shrinking cohort
       if (i < stages.length - 1) {
-        const next = Number(stages[i + 1][1]);
-        const conv = Number(val) > 0 ? (100 * next / Number(val)) : null;
-        const c = document.createElement("div");
-        c.className = "funnel-conv";
-        c.textContent = conv == null ? "" : `↓ ${conv.toFixed(1)}% continue to ${stages[i + 1][0].toLowerCase()}`;
-        fWrap.appendChild(c);
+        const prev = Number(val), next = Number(stages[i + 1][1]);
+        if (prev > 0 && next <= prev) {
+          const c = document.createElement("div");
+          c.className = "funnel-conv";
+          c.textContent = `↓ ${(100 * next / prev).toFixed(1)}% went on to ${stages[i + 1][0].toLowerCase()}`;
+          fWrap.appendChild(c);
+        }
       }
     });
+    if (!fn.invites_sent) {
+      const n = document.createElement("div");
+      n.className = "sub"; n.style.marginTop = "10px";
+      n.textContent = "No new invitations went out in this period — the campaign is messaging people who already accepted. Replies here come from leads invited earlier, so switch to All time to see the full funnel.";
+      fWrap.appendChild(n);
+    }
   }
   funnelCard.appendChild(fWrap);
   grid.appendChild(funnelCard);
