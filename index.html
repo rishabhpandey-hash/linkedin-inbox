@@ -178,21 +178,12 @@
       LinkedIn Inbox
     </div>
     <h1>Sign in</h1>
-    <p>Enter your work email. We'll send you a login link and a 6-digit code.</p>
+    <p>Enter your work email and we'll send you a sign-in link.</p>
     <div class="field">
       <label for="login-email">Email</label>
       <input id="login-email" type="email" autocomplete="email" placeholder="you@company.com">
     </div>
-    <button id="login-btn" class="btn btn-primary">Email me a login link</button>
-    <div id="code-block" class="hidden">
-      <div class="field" style="margin-top:14px">
-        <label for="login-code">Or paste the 6-digit code from the email</label>
-        <div id="code-row">
-          <input id="login-code" inputmode="numeric" maxlength="6" placeholder="••••••">
-          <button id="code-btn" class="btn btn-primary" style="width:auto">Verify</button>
-        </div>
-      </div>
-    </div>
+    <button id="login-btn" class="btn btn-primary">Email me a sign-in link</button>
     <div id="login-msg" class="login-msg"></div>
   </div>
 </div>
@@ -355,19 +346,7 @@ $("login-btn").addEventListener("click", async () => {
   });
   $("login-btn").disabled = false;
   if (error) { m.textContent = error.message; m.className = "login-msg error"; return; }
-  m.textContent = "Check your email — click the link, or paste the 6-digit code below.";
-  $("code-block").classList.remove("hidden");
-});
-
-$("code-btn").addEventListener("click", async () => {
-  const email = $("login-email").value.trim().toLowerCase();
-  const code = $("login-code").value.trim();
-  const m = $("login-msg");
-  if (code.length < 6) { m.textContent = "Enter the 6-digit code."; m.className = "login-msg error"; return; }
-  $("code-btn").disabled = true;
-  const { error } = await sb.auth.verifyOtp({ email, token: code, type: "email" });
-  $("code-btn").disabled = false;
-  if (error) { m.textContent = error.message; m.className = "login-msg error"; return; }
+  m.textContent = "Check your email and click the sign-in link — it opens the dashboard right here.";
 });
 
 $("logout-btn").addEventListener("click", async () => {
