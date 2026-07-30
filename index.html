@@ -1,19 +1,19 @@
 <!doctype html>
 <!--
-  LinkedIn Client Inbox (Konnector-backed) — static UI for the Supabase edge function API.
+  LinkedIn Client Inbox + Analytics (Konnector-backed) — static UI for the Supabase edge function API.
 
   API (base: https://qypevxpscdhdrzlelolt.supabase.co/functions/v1/inbox):
-    GET  /api/inbox?[campaign_id=][&client_id=]   Bearer JWT -> {client,user,campaigns,conversations}
-    GET  /api/thread?id=<conversation_id>          Bearer JWT -> {conversation,campaign,messages}
-    POST /api/reply {conversation_id, body}        Bearer JWT + can_reply -> {ok}
-    GET  /api/admin/overview                       Bearer JWT + is_admin
-    POST /api/admin/clients {name}
-    POST /api/admin/campaigns/map {encrypted_id,name,client_id}
-    POST /api/admin/campaigns/unmap {campaign_id}
-    POST /api/admin/users {email,client_id,can_reply,campaign_ids}
-    POST /api/admin/users/delete {email}
-  Auth: Supabase email OTP (magic link or 6-digit code). Whitelist lives in client_users.
-  Agent hooks: window.INBOX_API_BASE, <script id="inbox-data"> mirrors state, rows carry data-* attrs.
+    GET  /api/inbox?[campaign_id=][&client_id=]      Bearer JWT -> {client,user,campaigns,conversations}
+    GET  /api/analytics?days=7|30|90|all[&campaign_id=]  Bearer JWT -> {range,campaigns,db,funnel}
+    GET  /api/thread?id=<conversation_id>             Bearer JWT -> {conversation,campaign,messages}
+    POST /api/reply {conversation_id, body}           Bearer JWT + can_reply -> {ok}
+    GET  /api/admin/overview                          Bearer JWT + is_admin
+    POST /api/admin/clients {name} · /clients/logo {client_id,logo_url}
+    POST /api/admin/campaigns/map {encrypted_id,name,client_id} · /campaigns/unmap {campaign_id}
+    POST /api/admin/users {email,client_id,can_reply,campaign_ids} · /users/delete {email}
+  Auth: Supabase email magic link. Whitelist lives in client_users.
+  Analytics is visible to every signed-in user; replying needs can_reply.
+  Agent hooks: window.INBOX_API_BASE, <script id="inbox-data"> mirrors state, rows/tiles carry data-* attrs.
 -->
 <html lang="en">
 <head>
@@ -21,16 +21,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>LinkedIn Inbox</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a66c2'/%3E%3Cpath d='M11.6 12.9v10.2H8.3V12.9h3.3zM10 7.8a1.9 1.9 0 1 1 0 3.8 1.9 1.9 0 0 1 0-3.8zm4 5.1h3.1v1.4h.05c.44-.8 1.5-1.65 3.08-1.65 3.3 0 3.9 2.1 3.9 4.85v5.6h-3.25v-4.96c0-1.18-.02-2.7-1.65-2.7-1.66 0-1.9 1.29-1.9 2.62v5.04H14V12.9z' fill='white'/%3E%3C/svg%3E">
 <style>
   :root{
+    /* product chrome */
     --blue:#0a66c2; --blue-dark:#004182; --blue-soft:#eaf2fb;
     --bg:#f3f5f7; --card:#ffffff; --line:#e4e8ec; --text:#1c1e21; --muted:#5f6b76;
-    --green:#0c7a43; --green-soft:#e6f4ec; --amber:#8a5b00; --amber-soft:#fdf3dd;
-    --red:#b3261e; --radius:12px; --shadow:0 1px 2px rgba(20,30,40,.06),0 4px 14px rgba(20,30,40,.05);
+    --radius:12px; --shadow:0 1px 2px rgba(20,30,40,.06),0 4px 14px rgba(20,30,40,.05);
+
+    /* dataviz tokens (validated on the #ffffff card surface) */
+    --surface-1:#ffffff;
+    --series-1:#0a66c2;   /* brand blue  */
+    --series-2:#eb6834;   /* orange      */
+    --seq-100:#cde2fb; --seq-250:#86b6ef; --seq-350:#5598e7; --seq-450:#2a78d6; --seq-550:#1c5cab; --seq-650:#104281;
+    --text-primary:#0b0b0b; --text-secondary:#52514e; --text-muted:#898781;
+    --grid:#e1e0d9; --baseline:#c3c2b7;
+    --good:#0ca30c; --warning:#fab219; --critical:#d03b3b;
+    --amber:#8a5b00; --amber-soft:#fdf3dd; --red:#b3261e; --green:#0c7a43;
     font-size:15px;
   }
   *{box-sizing:border-box}
-  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text)}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text)}
   button{font:inherit;cursor:pointer}
   input,textarea,select{font:inherit}
   a{color:var(--blue)}
@@ -49,35 +60,30 @@
   .btn{border:0;border-radius:9px;padding:10px 16px;font-weight:600}
   .btn-primary{background:var(--blue);color:#fff;width:100%}
   .btn-primary:disabled{opacity:.55;cursor:default}
-  .btn-ghost{background:transparent;color:var(--blue)}
   .login-msg{font-size:.88rem;margin-top:12px;color:var(--muted)}
   .login-msg.error{color:var(--red)}
-  #code-row{display:flex;gap:8px}
-  #code-row input{flex:1;letter-spacing:.25em;text-align:center}
-  #code-row .btn{white-space:nowrap}
 
   /* ---------- app frame ---------- */
   #app-view{display:flex;flex-direction:column;height:100vh}
   header{background:var(--card);border-bottom:1px solid var(--line);padding:10px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
   .logo-box{display:flex;align-items:center;gap:10px;min-width:0}
-  .logo-box img{max-width:148px;max-height:34px;display:block}
+  .logo-box img{max-width:150px;max-height:36px;display:block}
   .logo-fallback{width:34px;height:34px;border-radius:8px;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700}
-  .logo-title{font-weight:700;white-space:nowrap}
-  .logo-sub{font-size:.75rem;color:var(--muted);display:flex;align-items:center;gap:5px}
-  .logo-sub svg{flex:none}
+  #client-name{font-weight:700;white-space:nowrap}
+  .tabs{display:flex;gap:4px;background:#eef1f4;border-radius:10px;padding:3px}
+  .tab{border:0;background:transparent;border-radius:8px;padding:6px 14px;font-weight:600;color:var(--muted)}
+  .tab.active{background:#fff;color:var(--blue);box-shadow:0 1px 2px rgba(0,0,0,.08)}
   header .spacer{flex:1}
   header select{padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:#fff;max-width:280px}
   .hbtn{border:1px solid var(--line);background:#fff;border-radius:9px;padding:7px 12px;font-weight:600;color:var(--text)}
   .hbtn.blue{color:var(--blue);border-color:#c4d9ef}
-  .who{font-size:.8rem;color:var(--muted);max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .who{font-size:.8rem;color:var(--muted);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
-  /* ---------- stats ---------- */
+  /* ---------- inbox ---------- */
   #stats{display:flex;gap:10px;padding:12px 18px 0;flex-wrap:wrap}
   .tile{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:10px 16px;min-width:118px;box-shadow:var(--shadow)}
   .tile .n{font-size:1.25rem;font-weight:700}
   .tile .l{font-size:.75rem;color:var(--muted)}
-
-  /* ---------- main ---------- */
   main{flex:1;display:flex;min-height:0;padding:12px 18px 18px;gap:14px}
   #list-pane{width:410px;flex:none;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);min-height:0}
   #chips{display:flex;gap:6px;padding:10px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
@@ -105,8 +111,6 @@
   .badge.camp{background:var(--blue-soft);color:var(--blue-dark)}
   .badge.via{background:#eef1f4;color:var(--muted)}
   #list-empty{padding:40px 20px;text-align:center;color:var(--muted);font-size:.9rem}
-
-  /* ---------- thread ---------- */
   #thread-pane{flex:1;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);min-width:0;min-height:0}
   #thread-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:.95rem}
   #thread-head{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
@@ -134,9 +138,71 @@
   #send-msg.error{color:var(--red)}
   #send-msg.ok{color:var(--green)}
 
+  /* ---------- analytics ---------- */
+  #analytics-view{flex:1;overflow-y:auto;padding:14px 18px 40px}
+  #range-row{display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+  #range-row .lbl{font-size:.78rem;color:var(--muted);font-weight:600;margin-right:2px}
+  .an-grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}
+  .card{background:var(--surface-1);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px 18px;min-width:0}
+  .card h3{margin:0;font-size:.95rem}
+  .card .sub{font-size:.75rem;color:var(--text-secondary);margin-top:2px}
+  .card-head{display:flex;align-items:flex-start;gap:10px;margin-bottom:12px}
+  .card-head .spacer{flex:1}
+  .col-12{grid-column:span 12}.col-8{grid-column:span 8}.col-6{grid-column:span 6}.col-4{grid-column:span 4}.col-5{grid-column:span 5}.col-7{grid-column:span 7}
+  @media (max-width:1080px){ .col-8,.col-6,.col-4,.col-5,.col-7{grid-column:span 12} }
+  .hero{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .hero .fig{font-size:3rem;font-weight:700;line-height:1;color:var(--text-primary)}
+  .hero .cap{font-size:.85rem;color:var(--text-secondary)}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}
+  .kpi{border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .kpi .v{font-size:1.3rem;font-weight:700}
+  .kpi .k{font-size:.74rem;color:var(--text-secondary);margin-top:1px}
+  .kpi .d{font-size:.72rem;color:var(--text-muted);margin-top:2px}
+  .attn{display:flex;gap:12px;align-items:center;border-left:3px solid var(--warning);background:#fffdf5;border-radius:8px;padding:10px 14px;margin-bottom:14px;flex-wrap:wrap}
+  .attn.crit{border-left-color:var(--critical);background:#fdf6f6}
+  .attn .ic{font-size:1.1rem}
+  .attn .tx{flex:1;font-size:.88rem}
+  .attn button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 12px;font-weight:600;font-size:.82rem;color:var(--blue)}
+  .an-table{width:100%;border-collapse:collapse;font-size:.85rem}
+  .an-table th{text-align:left;color:var(--text-secondary);font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;padding:6px 8px;border-bottom:1px solid var(--line);font-weight:600}
+  .an-table td{padding:7px 8px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+  .an-table td.name{font-variant-numeric:normal}
+  .an-table tr:last-child td{border-bottom:0}
+  .barcell{position:relative;min-width:90px}
+  .barcell .bar{height:8px;border-radius:0 4px 4px 0;background:var(--series-1)}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.78rem;color:var(--text-secondary);margin-top:8px}
+  .legend .it{display:inline-flex;align-items:center;gap:6px}
+  .legend .sw{width:14px;height:3px;border-radius:2px;display:inline-block}
+  .legend .sq{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .tbtn{border:1px solid var(--line);background:#fff;border-radius:7px;padding:4px 9px;font-size:.75rem;font-weight:600;color:var(--text-secondary)}
+  .chart-wrap{position:relative}
+  .chart-wrap svg{display:block;width:100%;height:auto;overflow:visible}
+  .vtip{position:absolute;pointer-events:none;background:#101418;color:#fff;border-radius:8px;padding:7px 10px;font-size:.78rem;box-shadow:0 6px 18px rgba(0,0,0,.22);opacity:0;transition:opacity .1s;z-index:5;white-space:nowrap}
+  .vtip .vt-h{font-size:.72rem;opacity:.75;margin-bottom:3px}
+  .vtip .vt-r{display:flex;align-items:center;gap:7px;line-height:1.5}
+  .vtip .vt-k{width:12px;height:3px;border-radius:2px;flex:none}
+  .vtip .vt-v{font-weight:700;font-variant-numeric:tabular-nums}
+  .vtip .vt-n{opacity:.8}
+  .funnel-row{display:flex;align-items:center;gap:10px;margin-bottom:4px}
+  .funnel-row .fl{width:150px;flex:none;font-size:.82rem;color:var(--text-secondary)}
+  .funnel-row .ft{flex:1;min-width:0}
+  .funnel-row .fv{width:74px;flex:none;text-align:right;font-weight:700;font-variant-numeric:tabular-nums}
+  .funnel-bar{height:22px;border-radius:0 4px 4px 0}
+  .funnel-conv{font-size:.72rem;color:var(--text-muted);margin:0 0 8px 160px}
+  .recent-item{display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);cursor:pointer}
+  .recent-item:last-child{border-bottom:0}
+  .recent-item:hover .rn{color:var(--blue)}
+  .recent-item .rn{font-weight:600;font-size:.86rem}
+  .recent-item .rp{font-size:.79rem;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .recent-item .rt{font-size:.72rem;color:var(--text-muted);flex:none;margin-left:auto}
+  .hm-scale{display:flex;align-items:center;gap:6px;font-size:.74rem;color:var(--text-secondary);margin-top:8px}
+  .hm-scale .sw{width:20px;height:11px;border-radius:2px}
+  .empty-note{color:var(--text-secondary);font-size:.86rem;padding:14px 0}
+  .loading-dim{opacity:.45}
+
   /* ---------- admin ---------- */
   #admin-overlay{position:fixed;inset:0;background:rgba(15,25,35,.45);display:flex;align-items:flex-start;justify-content:center;padding:30px 16px;overflow-y:auto;z-index:50}
-  #admin-panel{background:var(--card);border-radius:16px;max-width:860px;width:100%;padding:22px 26px;box-shadow:0 12px 40px rgba(0,0,0,.22)}
+  #admin-panel{background:var(--card);border-radius:16px;max-width:880px;width:100%;padding:22px 26px;box-shadow:0 12px 40px rgba(0,0,0,.22)}
   #admin-panel h2{margin:0 0 4px;font-size:1.1rem}
   #admin-panel h3{margin:20px 0 8px;font-size:.95rem}
   #admin-panel table{width:100%;border-collapse:collapse;font-size:.85rem}
@@ -146,14 +212,13 @@
   .mini.danger{color:var(--red);border-color:#eccfcd}
   .mini.go{color:#fff;background:var(--blue);border-color:var(--blue)}
   .form-inline{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
-  .form-inline input[type=text],.form-inline input[type=email],.form-inline select{padding:7px 10px;border:1px solid var(--line);border-radius:8px}
+  .form-inline input[type=text],.form-inline input[type=email],.form-inline input[type=url],.form-inline select{padding:7px 10px;border:1px solid var(--line);border-radius:8px}
   #admin-camp-checks{display:flex;flex-direction:column;gap:4px;font-size:.83rem;margin:6px 0;padding:8px 10px;border:1px dashed var(--line);border-radius:8px}
   #admin-msg{font-size:.83rem;margin-top:10px}
   #admin-msg.error{color:var(--red)}
   #admin-msg.ok{color:var(--green)}
   .admin-close{float:right;border:0;background:transparent;font-size:1.3rem;line-height:1;color:var(--muted)}
 
-  /* ---------- responsive ---------- */
   @media (max-width: 860px){
     main{padding:10px;gap:0}
     #list-pane{width:100%}
@@ -165,6 +230,9 @@
     .tile{min-width:calc(33% - 8px);padding:8px 12px}
     header{padding:10px 12px;gap:8px}
     .who{display:none}
+    #analytics-view{padding:10px 10px 30px}
+    .funnel-row .fl{width:104px;font-size:.76rem}
+    .funnel-conv{margin-left:114px}
   }
 </style>
 </head>
@@ -193,13 +261,11 @@
   <header>
     <div class="logo-box">
       <span id="client-logo"></span>
-      <div>
-        <div class="logo-title" id="client-name" data-role="client-name">…</div>
-        <div class="logo-sub">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="#0a66c2"><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.86 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.56V9h3.56v11.45z"/></svg>
-          LinkedIn Inbox
-        </div>
-      </div>
+      <span id="client-name">…</span>
+    </div>
+    <div class="tabs" role="tablist">
+      <button class="tab active" id="tab-inbox" role="tab" data-tab="inbox">Inbox</button>
+      <button class="tab" id="tab-analytics" role="tab" data-tab="analytics">Analytics</button>
     </div>
     <div class="spacer"></div>
     <select id="admin-client-switch" class="hidden" title="View as client"></select>
@@ -210,38 +276,52 @@
     <button id="logout-btn" class="hbtn">Log out</button>
   </header>
 
-  <div id="stats" data-role="stats"></div>
-
-  <main>
-    <section id="list-pane">
-      <div id="chips" data-role="chips"></div>
-      <div id="search-row"><input id="search" type="search" placeholder="Search name, company, message…" autocomplete="off"></div>
-      <div id="conv-list" data-role="conversation-list"></div>
-    </section>
-
-    <section id="thread-pane">
-      <div id="thread-placeholder">Select a conversation to read it</div>
-      <div id="thread-content" class="hidden" style="display:flex;flex-direction:column;flex:1;min-height:0">
-        <div id="thread-head">
-          <button id="back-btn" class="hbtn">←</button>
-          <span class="avatar" id="th-avatar"></span>
-          <div style="min-width:0">
-            <div class="th-name" id="th-name"></div>
-            <div class="th-sub" id="th-sub"></div>
+  <!-- ---------- INBOX TAB ---------- -->
+  <div id="inbox-view" style="display:flex;flex-direction:column;flex:1;min-height:0">
+    <div id="stats" data-role="stats"></div>
+    <main>
+      <section id="list-pane">
+        <div id="chips" data-role="chips"></div>
+        <div id="search-row"><input id="search" type="search" placeholder="Search name, company, message…" autocomplete="off"></div>
+        <div id="conv-list" data-role="conversation-list"></div>
+      </section>
+      <section id="thread-pane">
+        <div id="thread-placeholder">Select a conversation to read it</div>
+        <div id="thread-content" class="hidden" style="display:flex;flex-direction:column;flex:1;min-height:0">
+          <div id="thread-head">
+            <button id="back-btn" class="hbtn">←</button>
+            <span class="avatar" id="th-avatar"></span>
+            <div style="min-width:0">
+              <div class="th-name" id="th-name"></div>
+              <div class="th-sub" id="th-sub"></div>
+            </div>
+          </div>
+          <div id="msgs" data-role="messages"></div>
+          <div id="composer" class="hidden">
+            <textarea id="reply-text" placeholder="Write a reply…" maxlength="7900"></textarea>
+            <div class="c-row">
+              <span class="note" id="reply-note"></span>
+              <span id="send-msg"></span>
+              <button id="send-btn">Send reply</button>
+            </div>
           </div>
         </div>
-        <div id="msgs" data-role="messages"></div>
-        <div id="composer" class="hidden">
-          <textarea id="reply-text" placeholder="Write a reply…" maxlength="7900"></textarea>
-          <div class="c-row">
-            <span class="note" id="reply-note"></span>
-            <span id="send-msg"></span>
-            <button id="send-btn">Send reply</button>
-          </div>
-        </div>
-      </div>
-    </section>
-  </main>
+      </section>
+    </main>
+  </div>
+
+  <!-- ---------- ANALYTICS TAB ---------- -->
+  <div id="analytics-view" class="hidden" data-role="analytics">
+    <div id="range-row">
+      <span class="lbl">Period</span>
+      <button class="chip" data-days="7">7 days</button>
+      <button class="chip active" data-days="30">30 days</button>
+      <button class="chip" data-days="90">90 days</button>
+      <button class="chip" data-days="all">All time</button>
+      <span id="range-note" style="font-size:.76rem;color:var(--text-muted)"></span>
+    </div>
+    <div id="analytics-body"></div>
+  </div>
 </div>
 
 <!-- ======================= ADMIN ======================= -->
@@ -252,10 +332,15 @@
     <div style="color:var(--muted);font-size:.85rem">Clients, campaign mapping and user access for the LinkedIn inbox.</div>
 
     <h3>Clients</h3>
-    <table id="admin-clients"><thead><tr><th>Name</th><th>Campaigns</th><th>Users</th></tr></thead><tbody></tbody></table>
+    <table id="admin-clients"><thead><tr><th>Name</th><th>Campaigns</th><th>Users</th><th>Logo</th></tr></thead><tbody></tbody></table>
     <div class="form-inline">
       <input type="text" id="new-client-name" placeholder="New client name">
       <button class="mini go" id="add-client-btn">Add client</button>
+    </div>
+    <div class="form-inline">
+      <select id="logo-client"></select>
+      <input type="url" id="logo-url" placeholder="https://…logo.png" style="min-width:280px">
+      <button class="mini go" id="set-logo-btn">Set logo</button>
     </div>
 
     <h3>Mapped campaigns</h3>
@@ -288,44 +373,82 @@ const API = SUPABASE_URL + "/functions/v1/inbox";
 window.INBOX_API_BASE = API;
 
 const sb = createClient(SUPABASE_URL, ANON_KEY, { auth: { detectSessionInUrl: true, flowType: "implicit" } });
-
 const $ = (id) => document.getElementById(id);
 const state = {
   data: null, filter: "all", search: "", campaign: "", thread: null,
   adminClientId: "", appStarted: false, refreshTimer: null, admin: null,
+  tab: "inbox", days: "30", analytics: null, anLoading: false,
+};
+
+const C = {
+  s1: "#0a66c2", s2: "#eb6834",
+  seq: ["#cde2fb", "#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"],
+  ordinal: ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"],
+  grid: "#e1e0d9", base: "#c3c2b7", muted: "#898781", surface: "#ffffff",
 };
 
 function mirror() {
   try {
     $("inbox-data").textContent = JSON.stringify({
-      campaign: state.campaign, filter: state.filter, search: state.search,
-      thread_id: state.thread?.conversation?.id ?? null,
+      tab: state.tab, campaign: state.campaign, filter: state.filter, days: state.days,
+      search: state.search, thread_id: state.thread?.conversation?.id ?? null,
       conversations: state.data?.conversations?.length ?? 0,
       user: state.data?.user ?? null,
+      analytics_loaded: !!state.analytics,
     });
   } catch {}
 }
 
-async function token() {
-  const { data } = await sb.auth.getSession();
-  return data?.session?.access_token ?? null;
-}
+async function token() { const { data } = await sb.auth.getSession(); return data?.session?.access_token ?? null; }
 
 async function api(path, opts = {}) {
   const t = await token();
   if (!t) throw Object.assign(new Error("no session"), { status: 401 });
   const url = new URL(API + path);
   if (state.adminClientId) url.searchParams.set("client_id", state.adminClientId);
-  const res = await fetch(url, {
-    ...opts,
-    headers: { Authorization: "Bearer " + t, "Content-Type": "application/json", ...(opts.headers ?? {}) },
-  });
+  const res = await fetch(url, { ...opts, headers: { Authorization: "Bearer " + t, "Content-Type": "application/json", ...(opts.headers ?? {}) } });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(body.error ?? res.status), { status: res.status, body });
   return body;
 }
 
-/* ---------------- login ---------------- */
+/* ================= helpers ================= */
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const nf = (n) => (n === null || n === undefined || Number.isNaN(n)) ? "—" : Number(n).toLocaleString();
+function compact(n) {
+  if (n === null || n === undefined) return "—";
+  const v = Number(n);
+  if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  if (Math.abs(v) >= 10000) return (v / 1000).toFixed(1).replace(/\.0$/, "") + "K";
+  return v.toLocaleString();
+}
+const pct = (n) => (n === null || n === undefined) ? "—" : Number(n).toFixed(1) + "%";
+function dur(secs) {
+  if (secs === null || secs === undefined) return "—";
+  const s = Number(secs);
+  if (s < 3600) return Math.max(1, Math.round(s / 60)) + " min";
+  if (s < 86400) return (s / 3600).toFixed(1).replace(/\.0$/, "") + " h";
+  return (s / 86400).toFixed(1).replace(/\.0$/, "") + " d";
+}
+function timeAgo(iso) {
+  if (!iso) return "";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 3600) return Math.max(1, Math.floor(s / 60)) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  if (s < 7 * 86400) return Math.floor(s / 86400) + "d";
+  return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+const initials = (name) => (name || "?").split(/\s+/).slice(0, 2).map(w => w[0] ?? "").join("").toUpperCase();
+const shorten = (s, n) => (s ?? "").length > n ? s.slice(0, n - 1) + "…" : (s ?? "");
+const SVGNS = "http://www.w3.org/2000/svg";
+function el(tag, attrs = {}, parent) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+
+/* ================= login ================= */
 function showLogin(msg, isError) {
   state.appStarted = false;
   if (state.refreshTimer) { clearInterval(state.refreshTimer); state.refreshTimer = null; }
@@ -333,46 +456,34 @@ function showLogin(msg, isError) {
   $("login-view").classList.remove("hidden");
   if (msg) { const m = $("login-msg"); m.textContent = msg; m.className = "login-msg" + (isError ? " error" : ""); }
 }
-
 $("login-btn").addEventListener("click", async () => {
   const email = $("login-email").value.trim().toLowerCase();
   const m = $("login-msg");
   if (!email || !email.includes("@")) { m.textContent = "Enter a valid email."; m.className = "login-msg error"; return; }
-  $("login-btn").disabled = true;
-  m.textContent = "Sending…"; m.className = "login-msg";
-  const { error } = await sb.auth.signInWithOtp({
-    email,
-    options: { emailRedirectTo: location.origin + location.pathname },
-  });
+  $("login-btn").disabled = true; m.textContent = "Sending…"; m.className = "login-msg";
+  const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
   $("login-btn").disabled = false;
   if (error) { m.textContent = error.message; m.className = "login-msg error"; return; }
   m.textContent = "Check your email and click the sign-in link — it opens the dashboard right here.";
 });
-
 $("logout-btn").addEventListener("click", async () => {
   await sb.auth.signOut();
-  state.data = null; state.filter = "all"; state.search = ""; state.campaign = "";
-  state.thread = null; state.adminClientId = ""; state.admin = null;
+  Object.assign(state, { data: null, filter: "all", search: "", campaign: "", thread: null, adminClientId: "", admin: null, tab: "inbox", analytics: null });
   $("search").value = ""; $("admin-btn").classList.add("hidden");
-  $("admin-client-switch").classList.add("hidden");
-  $("admin-overlay").classList.add("hidden");
-  document.body.classList.remove("thread-open");
-  closeThread();
+  $("admin-client-switch").classList.add("hidden"); $("admin-overlay").classList.add("hidden");
+  document.body.classList.remove("thread-open"); closeThread(); setTab("inbox");
   showLogin("Signed out.");
 });
+sb.auth.onAuthStateChange((_e, session) => { if (session && !state.appStarted) startApp(); });
 
-sb.auth.onAuthStateChange((_event, session) => {
-  if (session && !state.appStarted) startApp();
-});
-
-/* ---------------- app ---------------- */
+/* ================= app ================= */
 async function startApp() {
   state.appStarted = true;
   $("login-view").classList.add("hidden");
   $("app-view").classList.remove("hidden");
   try {
     await load();
-    if (!state.refreshTimer) state.refreshTimer = setInterval(() => load(true), 120000);
+    if (!state.refreshTimer) state.refreshTimer = setInterval(() => { if (state.tab === "inbox") load(true); }, 120000);
   } catch (e) {
     if (e.status === 403) showLogin("This email doesn't have access to the dashboard. Ask your admin to add you.", true);
     else if (e.status === 401) showLogin("Session expired — sign in again.", true);
@@ -382,32 +493,27 @@ async function startApp() {
 
 async function load(silent) {
   const qs = state.campaign ? "?campaign_id=" + encodeURIComponent(state.campaign) : "";
-  const data = await api("/api/inbox" + (qs ? qs : ""));
-  state.data = data;
-  renderHeader(); renderStats(); renderChips(); renderList();
-  mirror();
-  if (!silent && data.user?.is_admin) {
-    $("admin-btn").classList.remove("hidden");
-    setupClientSwitch();
-  }
+  state.data = await api("/api/inbox" + qs);
+  renderHeader(); renderStats(); renderChips(); renderList(); mirror();
+  if (!silent && state.data.user?.is_admin) { $("admin-btn").classList.remove("hidden"); setupClientSwitch(); }
 }
 
 function renderHeader() {
   const c = state.data.client;
-  $("client-name").textContent = c.name;
   $("who").textContent = state.data.user.email;
-  const box = $("client-logo");
+  const box = $("client-logo"), nameEl = $("client-name");
   box.innerHTML = "";
   if (c.logo_url) {
+    nameEl.classList.add("hidden");
     const img = document.createElement("img");
     img.src = c.logo_url; img.alt = c.name;
-    img.onerror = () => { box.innerHTML = `<span class="logo-fallback">${(c.name || "?")[0].toUpperCase()}</span>`; };
+    img.onerror = () => { box.innerHTML = ""; nameEl.classList.remove("hidden"); nameEl.textContent = c.name; };
     box.appendChild(img);
   } else {
-    box.innerHTML = `<span class="logo-fallback">${(c.name || "?")[0].toUpperCase()}</span>`;
+    nameEl.classList.remove("hidden");
+    nameEl.textContent = c.name;
   }
-  const sel = $("campaign-select");
-  const prev = state.campaign;
+  const sel = $("campaign-select"), prev = state.campaign;
   sel.innerHTML = '<option value="">All campaigns</option>';
   for (const camp of state.data.campaigns) {
     const o = document.createElement("option");
@@ -416,27 +522,30 @@ function renderHeader() {
   }
   sel.value = prev && [...sel.options].some(o => o.value === prev) ? prev : "";
   state.campaign = sel.value;
-  sel.parentElement.classList.toggle("hidden", false);
 }
 
-function fmtN(n) { return (n === null || n === undefined) ? "—" : Number(n).toLocaleString(); }
+/* ================= tabs ================= */
+function setTab(tab) {
+  state.tab = tab;
+  $("tab-inbox").classList.toggle("active", tab === "inbox");
+  $("tab-analytics").classList.toggle("active", tab === "analytics");
+  $("inbox-view").classList.toggle("hidden", tab !== "inbox");
+  $("inbox-view").style.display = tab === "inbox" ? "flex" : "none";
+  $("analytics-view").classList.toggle("hidden", tab !== "analytics");
+  mirror();
+  if (tab === "analytics" && !state.analytics) loadAnalytics();
+}
+$("tab-inbox").addEventListener("click", () => setTab("inbox"));
+$("tab-analytics").addEventListener("click", () => setTab("analytics"));
 
+/* ================= inbox: stats/chips/list ================= */
 function renderStats() {
-  const wrap = $("stats");
-  wrap.innerHTML = "";
-  const camps = state.campaign
-    ? state.data.campaigns.filter(c => c.id === state.campaign)
-    : state.data.campaigns;
-  const sum = (k) => {
-    let any = false, total = 0;
-    for (const c of camps) { const v = c.stats?.[k]; if (v !== null && v !== undefined) { any = true; total += Number(v); } }
-    return any ? total : null;
-  };
+  const wrap = $("stats"); wrap.innerHTML = "";
+  const camps = state.campaign ? state.data.campaigns.filter(c => c.id === state.campaign) : state.data.campaigns;
+  const sum = (k) => { let any = false, t = 0; for (const c of camps) { const v = c.stats?.[k]; if (v !== null && v !== undefined) { any = true; t += Number(v); } } return any ? t : null; };
   const convs = state.data.conversations.filter(cv => !state.campaign || cv.campaign_id === state.campaign);
   const tiles = [
     ["Leads in campaign", sum("member_count")],
-    ["Invites sent", sum("friend_request_count")],
-    ["Invites accepted", sum("friend_accept_count")],
     ["Messages sent", sum("message_sent_count")],
     ["Conversations", convs.length],
     ["Awaiting your reply", convs.filter(c => c.last_direction === "REPLY").length],
@@ -445,11 +554,10 @@ function renderStats() {
     if (val === null) continue;
     const d = document.createElement("div");
     d.className = "tile"; d.dataset.stat = label;
-    d.innerHTML = `<div class="n">${fmtN(val)}</div><div class="l">${label}</div>`;
+    d.innerHTML = `<div class="n">${nf(val)}</div><div class="l">${label}</div>`;
     wrap.appendChild(d);
   }
 }
-
 function filteredConvs() {
   const q = state.search.toLowerCase();
   return state.data.conversations.filter(cv => {
@@ -463,7 +571,6 @@ function filteredConvs() {
     return true;
   });
 }
-
 function renderChips() {
   const inScope = state.data.conversations.filter(cv => !state.campaign || cv.campaign_id === state.campaign);
   const chips = [
@@ -471,8 +578,7 @@ function renderChips() {
     ["needs_reply", "Needs reply", inScope.filter(c => c.last_direction === "REPLY").length],
     ["handled", "Replied", inScope.filter(c => c.last_direction === "SENT").length],
   ];
-  const wrap = $("chips");
-  wrap.innerHTML = "";
+  const wrap = $("chips"); wrap.innerHTML = "";
   for (const [key, label, count] of chips) {
     const b = document.createElement("button");
     b.className = "chip" + (state.filter === key ? " active" : "");
@@ -482,223 +588,609 @@ function renderChips() {
     wrap.appendChild(b);
   }
 }
-
-function timeAgo(iso) {
-  if (!iso) return "";
-  const s = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (s < 3600) return Math.max(1, Math.floor(s / 60)) + "m";
-  if (s < 86400) return Math.floor(s / 3600) + "h";
-  if (s < 7 * 86400) return Math.floor(s / 86400) + "d";
-  return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
-}
-
-function initials(name) { return (name || "?").split(/\s+/).slice(0, 2).map(w => w[0] ?? "").join("").toUpperCase(); }
-
-function campName(id) { return state.data.campaigns.find(c => c.id === id)?.name ?? ""; }
-
+const campName = (id) => state.data.campaigns.find(c => c.id === id)?.name ?? "";
 function renderList() {
-  const wrap = $("conv-list");
-  wrap.innerHTML = "";
+  const wrap = $("conv-list"); wrap.innerHTML = "";
   const rows = filteredConvs();
-  if (!rows.length) {
-    wrap.innerHTML = `<div id="list-empty">No conversations here yet.</div>`;
-    return;
-  }
+  if (!rows.length) { wrap.innerHTML = `<div id="list-empty">No conversations here yet.</div>`; return; }
   for (const cv of rows) {
     const div = document.createElement("div");
     div.className = "row" + (state.thread?.conversation?.id === cv.id ? " sel" : "");
     div.dataset.conversationId = cv.id;
     div.dataset.direction = cv.last_direction ?? "";
-    const img = cv.profile?.image ? `<img src="${cv.profile.image}" alt="" onerror="this.remove()">` : "";
+    const img = cv.profile?.image ? `<img src="${esc(cv.profile.image)}" alt="" onerror="this.remove()">` : "";
     const await_ = cv.last_direction === "REPLY" ? `<span class="badge await">Awaiting your reply</span>` : "";
-    const campBadge = !state.campaign && state.data.campaigns.length > 1 ? `<span class="badge camp">${escapeHtml(shorten(campName(cv.campaign_id), 30))}</span>` : "";
+    const campBadge = !state.campaign && state.data.campaigns.length > 1 ? `<span class="badge camp">${esc(shorten(campName(cv.campaign_id), 30))}</span>` : "";
     div.innerHTML = `
       <span class="avatar">${img}${img ? "" : initials(cv.profile?.name)}</span>
       <div class="row-main">
         <div class="row-top">
-          <span class="row-name">${escapeHtml(cv.profile?.name ?? "Unknown")}</span>
+          <span class="row-name">${esc(cv.profile?.name ?? "Unknown")}</span>
           <span class="row-time">${timeAgo(cv.last_message_at)}</span>
         </div>
-        <div class="row-occ">${escapeHtml(cv.profile?.occupation ?? "")}</div>
-        <div class="row-preview ${cv.last_direction === "REPLY" ? "unreplied" : ""}">${cv.last_direction === "SENT" ? "You: " : ""}${escapeHtml(cv.last_message_preview ?? "")}</div>
-        <div class="badges">${await_}${campBadge}<span class="badge via">via ${escapeHtml(cv.sender_name ?? "?")}</span></div>
+        <div class="row-occ">${esc(cv.profile?.occupation ?? "")}</div>
+        <div class="row-preview ${cv.last_direction === "REPLY" ? "unreplied" : ""}">${cv.last_direction === "SENT" ? "You: " : ""}${esc(cv.last_message_preview ?? "")}</div>
+        <div class="badges">${await_}${campBadge}<span class="badge via">via ${esc(cv.sender_name ?? "?")}</span></div>
       </div>`;
     div.addEventListener("click", () => openThread(cv.id));
     wrap.appendChild(div);
   }
 }
 
-function shorten(s, n) { return (s ?? "").length > n ? s.slice(0, n - 1) + "…" : (s ?? ""); }
-function escapeHtml(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
-
-/* ---------------- thread ---------------- */
+/* ================= thread ================= */
 function closeThread() {
   state.thread = null;
   $("thread-content").classList.add("hidden");
   $("thread-placeholder").classList.remove("hidden");
   document.body.classList.remove("thread-open");
 }
-
 $("back-btn").addEventListener("click", () => { closeThread(); renderList(); });
-
 async function openThread(id) {
   try {
-    const t = await api("/api/thread?id=" + encodeURIComponent(id));
-    state.thread = t;
-    renderThread();
-    renderList();
+    state.thread = await api("/api/thread?id=" + encodeURIComponent(id));
+    if (state.tab !== "inbox") setTab("inbox");
+    renderThread(); renderList();
     document.body.classList.add("thread-open");
     mirror();
-  } catch (e) {
-    alert("Could not open the conversation: " + e.message);
-  }
+  } catch (e) { alert("Could not open the conversation: " + e.message); }
 }
-
 function renderThread() {
   const { conversation: cv, campaign, messages } = state.thread;
   $("thread-placeholder").classList.add("hidden");
   $("thread-content").classList.remove("hidden");
-  const av = $("th-avatar");
-  av.innerHTML = cv.profile?.image ? `<img src="${cv.profile.image}" alt="" onerror="this.remove()">` : initials(cv.profile?.name);
-  const link = cv.profile?.profile_url
-    ? `<a href="${cv.profile.profile_url}" target="_blank" rel="noopener">${escapeHtml(cv.profile?.name ?? "")}</a>`
-    : escapeHtml(cv.profile?.name ?? "");
-  $("th-name").innerHTML = link;
-  const bits = [cv.profile?.occupation, campaign?.name, "via " + (cv.sender_name ?? "?")].filter(Boolean);
-  $("th-sub").textContent = bits.join("  ·  ");
-
-  const box = $("msgs");
-  box.innerHTML = "";
+  $("th-avatar").innerHTML = cv.profile?.image ? `<img src="${esc(cv.profile.image)}" alt="" onerror="this.remove()">` : initials(cv.profile?.name);
+  $("th-name").innerHTML = cv.profile?.profile_url
+    ? `<a href="${esc(cv.profile.profile_url)}" target="_blank" rel="noopener">${esc(cv.profile?.name ?? "")}</a>`
+    : esc(cv.profile?.name ?? "");
+  $("th-sub").textContent = [cv.profile?.occupation, campaign?.name, "via " + (cv.sender_name ?? "?")].filter(Boolean).join("  ·  ");
+  const box = $("msgs"); box.innerHTML = "";
   for (const m of messages) {
     const isOut = m.direction === "SENT";
     const who = isOut ? (cv.sender_name ?? "You") : (cv.profile?.name ?? "Lead");
     const d = document.createElement("div");
     d.className = "msg " + (isOut ? "out" : "in");
     d.dataset.type = m.type;
-    d.innerHTML = `<div class="bubble">${escapeHtml(m.body)}</div>
-      <div class="meta">${escapeHtml(who)} · ${new Date(m.at).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}${m.type === "dashboard_reply" ? " · dashboard" : ""}</div>`;
+    d.innerHTML = `<div class="bubble">${esc(m.body)}</div>
+      <div class="meta">${esc(who)} · ${new Date(m.at).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}${m.type === "dashboard_reply" ? " · dashboard" : ""}</div>`;
     box.appendChild(d);
   }
   box.scrollTop = box.scrollHeight;
-
   const composer = $("composer");
   if (state.data.user.can_reply) {
     composer.classList.remove("hidden");
     $("reply-note").textContent = `Sends from ${cv.sender_name ?? "the campaign sender"}'s LinkedIn profile`;
-    $("send-msg").textContent = "";
-    $("reply-text").value = "";
-  } else {
-    composer.classList.add("hidden");
+    $("send-msg").textContent = ""; $("reply-text").value = "";
+  } else composer.classList.add("hidden");
+}
+$("send-btn").addEventListener("click", async () => {
+  const text = $("reply-text").value.trim(), m = $("send-msg");
+  if (!text) { m.textContent = "Write a message first."; m.className = "error"; return; }
+  $("send-btn").disabled = true; m.textContent = "Sending…"; m.className = "";
+  try {
+    await api("/api/reply", { method: "POST", body: JSON.stringify({ conversation_id: state.thread.conversation.id, body: text }) });
+    m.textContent = "Sent ✓"; m.className = "ok"; $("reply-text").value = "";
+    await openThread(state.thread.conversation.id);
+    await load(true);
+    state.analytics = null;
+  } catch (e) { m.textContent = "Failed: " + (e.body?.error ?? e.message); m.className = "error"; }
+  finally { $("send-btn").disabled = false; }
+});
+
+/* ================= controls ================= */
+$("search").addEventListener("input", (e) => { state.search = e.target.value; renderList(); mirror(); });
+$("campaign-select").addEventListener("change", async (e) => {
+  state.campaign = e.target.value; closeThread();
+  await load(true);
+  state.analytics = null;
+  if (state.tab === "analytics") loadAnalytics();
+});
+$("refresh-btn").addEventListener("click", async () => {
+  const b = $("refresh-btn"); b.disabled = true; const old = b.textContent; b.textContent = "Refreshing…";
+  const t0 = Date.now();
+  try { await load(true); if (state.tab === "analytics") { state.analytics = null; await loadAnalytics(); } } catch {}
+  setTimeout(() => { b.disabled = false; b.textContent = old; }, Math.max(0, 450 - (Date.now() - t0)));
+});
+for (const b of document.querySelectorAll("#range-row .chip")) {
+  b.addEventListener("click", () => {
+    state.days = b.dataset.days;
+    for (const x of document.querySelectorAll("#range-row .chip")) x.classList.toggle("active", x === b);
+    loadAnalytics();
+  });
+}
+
+/* ================= analytics ================= */
+async function loadAnalytics() {
+  const body = $("analytics-body");
+  if (state.anLoading) return;
+  state.anLoading = true;
+  if (state.analytics) body.classList.add("loading-dim");
+  else body.innerHTML = `<div class="card col-12"><div class="empty-note">Loading analytics…</div></div>`;
+  try {
+    const qs = new URLSearchParams({ days: state.days });
+    if (state.campaign) qs.set("campaign_id", state.campaign);
+    state.analytics = await api("/api/analytics?" + qs.toString());
+    renderAnalytics();
+  } catch (e) {
+    body.innerHTML = `<div class="card col-12"><div class="empty-note">Could not load analytics: ${esc(e.body?.detail ?? e.message)}</div></div>`;
+  } finally {
+    state.anLoading = false; body.classList.remove("loading-dim"); mirror();
   }
 }
 
-$("send-btn").addEventListener("click", async () => {
-  const text = $("reply-text").value.trim();
-  const m = $("send-msg");
-  if (!text) { m.textContent = "Write a message first."; m.className = "error"; return; }
-  $("send-btn").disabled = true;
-  m.textContent = "Sending…"; m.className = "";
-  try {
-    await api("/api/reply", { method: "POST", body: JSON.stringify({ conversation_id: state.thread.conversation.id, body: text }) });
-    m.textContent = "Sent ✓"; m.className = "ok";
-    $("reply-text").value = "";
-    await openThread(state.thread.conversation.id);
-    await load(true);
-  } catch (e) {
-    m.textContent = "Failed: " + (e.body?.error ?? e.message); m.className = "error";
-  } finally {
-    $("send-btn").disabled = false;
+function renderAnalytics() {
+  const a = state.analytics, body = $("analytics-body");
+  const db = a.db ?? {}, live = db.live ?? {}, rng = db.range ?? {}, fn = a.funnel ?? {};
+  $("range-note").textContent = a.range?.label ? `· ${a.range.label}` + (state.campaign ? " · 1 campaign" : ` · ${a.campaigns.length} campaign${a.campaigns.length === 1 ? "" : "s"}`) : "";
+  body.innerHTML = "";
+  const grid = document.createElement("div");
+  grid.className = "an-grid";
+
+  /* --- needs attention --- */
+  if (live.awaiting) {
+    const crit = (live.awaiting_48h ?? 0) > 0;
+    const attn = document.createElement("div");
+    attn.className = "attn" + (crit ? " crit" : "");
+    attn.innerHTML = `<span class="ic">${crit ? "⚠️" : "💬"}</span>
+      <span class="tx"><strong>${nf(live.awaiting)} conversation${live.awaiting === 1 ? "" : "s"} waiting on a reply</strong>${crit ? ` — ${nf(live.awaiting_48h)} have been waiting more than 48 hours.` : "."}</span>`;
+    const btn = document.createElement("button");
+    btn.textContent = "Open in inbox";
+    btn.addEventListener("click", () => { state.filter = "needs_reply"; setTab("inbox"); renderChips(); renderList(); });
+    attn.appendChild(btn);
+    body.appendChild(attn);
   }
-});
 
-/* ---------------- search & controls ---------------- */
-$("search").addEventListener("input", (e) => { state.search = e.target.value; renderList(); mirror(); });
-$("campaign-select").addEventListener("change", async (e) => {
-  state.campaign = e.target.value;
-  closeThread();
-  await load(true);
-});
-$("refresh-btn").addEventListener("click", async () => {
-  const b = $("refresh-btn");
-  b.disabled = true; const old = b.textContent; b.textContent = "Refreshing…";
-  const started = Date.now();
-  try { await load(true); } catch {}
-  setTimeout(() => { b.disabled = false; b.textContent = old; }, Math.max(0, 450 - (Date.now() - started)));
-});
+  /* --- hero + KPIs --- */
+  const heroCard = document.createElement("div");
+  heroCard.className = "card col-12";
+  heroCard.innerHTML = `
+    <div class="hero">
+      <span class="fig" data-hero="lead_replies">${compact(rng.lead_replies ?? 0)}</span>
+      <span class="cap">replies received from leads · ${esc(a.range?.label ?? "")}<br>
+        across ${nf(rng.leads_replying ?? 0)} people · ${nf(live.conversations ?? 0)} conversations tracked in total</span>
+    </div>
+    <div class="kpis" style="margin-top:16px">
+      ${kpi("Invitations sent", compact(fn.invites_sent), null)}
+      ${kpi("Connections accepted", compact(fn.invites_accepted), fn.acceptance_pct != null ? pct(fn.acceptance_pct) + " acceptance" : null)}
+      ${kpi("Messages sent", compact(fn.messages_sent), fn.followups_sent != null ? compact(fn.followups_sent) + " follow-ups" : null)}
+      ${kpi("Leads who replied", compact(fn.lead_replies), fn.message_reply_pct != null ? pct(fn.message_reply_pct) + " of messages" : null)}
+      ${kpi("Profile visits", compact(fn.profile_visits), "warm-up activity")}
+      ${kpi("Awaiting your reply", nf(live.awaiting ?? 0), "right now")}
+    </div>`;
+  grid.appendChild(heroCard);
 
-/* ---------------- admin ---------------- */
+  /* --- funnel --- */
+  const funnelCard = document.createElement("div");
+  funnelCard.className = "card col-5";
+  funnelCard.appendChild(cardHead("Outreach funnel", a.range?.label ?? ""));
+  const fWrap = document.createElement("div");
+  if (fn.invites_sent == null) {
+    fWrap.innerHTML = `<div class="empty-note">Funnel data is not available for this period.</div>`;
+  } else {
+    const stages = [
+      ["Invitations sent", fn.invites_sent],
+      ["Connections accepted", fn.invites_accepted],
+      ["Leads who replied", fn.lead_replies],
+      ["Still talking now", live.engaged],
+    ].filter(s => s[1] != null);
+    const max = Math.max(...stages.map(s => Number(s[1]) || 0), 1);
+    stages.forEach(([label, val], i) => {
+      const row = document.createElement("div");
+      row.className = "funnel-row";
+      row.dataset.stage = label;
+      const w = Math.max(1.5, (Number(val) / max) * 100);
+      row.innerHTML = `<span class="fl">${esc(label)}</span>
+        <span class="ft"><span class="funnel-bar" style="display:block;width:${w}%;background:${C.ordinal[Math.min(i, C.ordinal.length - 1)]}"></span></span>
+        <span class="fv">${nf(val)}</span>`;
+      fWrap.appendChild(row);
+      if (i < stages.length - 1) {
+        const next = Number(stages[i + 1][1]);
+        const conv = Number(val) > 0 ? (100 * next / Number(val)) : null;
+        const c = document.createElement("div");
+        c.className = "funnel-conv";
+        c.textContent = conv == null ? "" : `↓ ${conv.toFixed(1)}% continue to ${stages[i + 1][0].toLowerCase()}`;
+        fWrap.appendChild(c);
+      }
+    });
+  }
+  funnelCard.appendChild(fWrap);
+  grid.appendChild(funnelCard);
+
+  /* --- response performance --- */
+  const respCard = document.createElement("div");
+  respCard.className = "card col-7";
+  respCard.appendChild(cardHead("How fast leads get answered", "Time from a lead's reply to your team's next message"));
+  respCard.insertAdjacentHTML("beforeend", `
+    <div class="kpis">
+      ${kpi("Median response", dur(rng.response_median_secs), "typical case")}
+      ${kpi("Average response", dur(rng.response_avg_secs), "pulled up by slow outliers")}
+      ${kpi("Answered within 24h", rng.response_under_24h_pct != null ? pct(rng.response_under_24h_pct) : "—", `${nf(rng.answered ?? 0)} answered`)}
+      ${kpi("Never answered", nf(rng.unanswered ?? 0), "leads replied, no response yet")}
+    </div>
+    <div class="sub" style="margin-top:10px">Faster first responses are the single biggest lever on booked calls — replies inside the first hour convert best.</div>`);
+  grid.appendChild(respCard);
+
+  /* --- charts --- */
+  const actCard = document.createElement("div");
+  actCard.className = "card col-7";
+  actCard.appendChild(cardHead("Outreach activity per day", "Invitations and messages sent by the campaign"));
+  const actSeries = [
+    { name: "Invitations sent", color: C.s1, points: toPoints(fn.daily_invites) },
+    { name: "Messages sent", color: C.s2, points: toPoints(fn.daily_messages) },
+  ].filter(s => s.points.length);
+  actCard.appendChild(lineChart(actSeries, { height: 210 }));
+  grid.appendChild(actCard);
+
+  const repCard = document.createElement("div");
+  repCard.className = "card col-5";
+  repCard.appendChild(cardHead("Replies received per day", "Messages from leads (IST)"));
+  repCard.appendChild(lineChart(
+    [{ name: "Replies", color: C.s1, points: (db.daily ?? []).map(d => ({ x: new Date(d.date + "T00:00:00"), y: d.replies })) }],
+    { height: 210, area: true },
+  ));
+  grid.appendChild(repCard);
+
+  /* --- heatmap --- */
+  const hmCard = document.createElement("div");
+  hmCard.className = "card col-12";
+  hmCard.appendChild(cardHead("When leads reply", "Local time in India (IST) — the best windows to be online and answer"));
+  hmCard.appendChild(heatmap(db.heatmap ?? []));
+  grid.appendChild(hmCard);
+
+  /* --- senders --- */
+  const sendCard = document.createElement("div");
+  sendCard.className = "card col-7";
+  sendCard.appendChild(cardHead("Performance by LinkedIn profile", "Which sending profile is driving conversations"));
+  sendCard.appendChild(senderTable(db.senders ?? []));
+  grid.appendChild(sendCard);
+
+  /* --- recent replies --- */
+  const recCard = document.createElement("div");
+  recCard.className = "card col-5";
+  recCard.appendChild(cardHead("Latest replies waiting", "Click a name to open the conversation"));
+  const recWrap = document.createElement("div");
+  const recents = db.recent ?? [];
+  if (!recents.length) recWrap.innerHTML = `<div class="empty-note">Nothing waiting — every reply has been answered.</div>`;
+  for (const r of recents) {
+    const it = document.createElement("div");
+    it.className = "recent-item";
+    it.dataset.conversationId = r.id;
+    const av = document.createElement("span");
+    av.className = "avatar"; av.style.width = "34px"; av.style.height = "34px"; av.style.fontSize = ".75rem";
+    av.textContent = initials(r.name);
+    const mid = document.createElement("div");
+    mid.style.minWidth = "0"; mid.style.flex = "1";
+    const nm = document.createElement("div"); nm.className = "rn"; nm.textContent = r.name ?? "Unknown";
+    const pv = document.createElement("div"); pv.className = "rp"; pv.textContent = r.last_message_preview ?? "";
+    mid.append(nm, pv);
+    const tm = document.createElement("span"); tm.className = "rt"; tm.textContent = timeAgo(r.last_message_at);
+    it.append(av, mid, tm);
+    it.addEventListener("click", () => openThread(r.id));
+    recWrap.appendChild(it);
+  }
+  recCard.appendChild(recWrap);
+  grid.appendChild(recCard);
+
+  /* --- campaign table --- */
+  if ((db.campaigns ?? []).length > 1) {
+    const cCard = document.createElement("div");
+    cCard.className = "card col-12";
+    cCard.appendChild(cardHead("Campaign comparison", "All time totals from Konnector, conversations from your inbox"));
+    cCard.appendChild(campaignTable(db.campaigns ?? [], fn.per_campaign ?? []));
+    grid.appendChild(cCard);
+  }
+
+  body.appendChild(grid);
+}
+
+function kpi(label, value, detail) {
+  return `<div class="kpi" data-kpi="${esc(label)}"><div class="v">${esc(value)}</div><div class="k">${esc(label)}</div>${detail ? `<div class="d">${esc(detail)}</div>` : ""}</div>`;
+}
+function cardHead(title, sub) {
+  const h = document.createElement("div");
+  h.className = "card-head";
+  const box = document.createElement("div");
+  const t = document.createElement("h3"); t.textContent = title;
+  box.appendChild(t);
+  if (sub) { const s = document.createElement("div"); s.className = "sub"; s.textContent = sub; box.appendChild(s); }
+  h.appendChild(box);
+  const sp = document.createElement("div"); sp.className = "spacer"; h.appendChild(sp);
+  return h;
+}
+function toPoints(arr) {
+  return (arr ?? []).filter(d => d?.date).map(d => ({ x: new Date(d.date + "T00:00:00"), y: Number(d.n) || 0 })).sort((p, q) => p.x - q.x);
+}
+
+/* ---- line chart with crosshair tooltip + table view ---- */
+function lineChart(series, { height = 210, area = false } = {}) {
+  const wrap = document.createElement("div");
+  const live = series.filter(s => s.points.length);
+  if (!live.length) { wrap.innerHTML = `<div class="empty-note">No activity recorded in this period.</div>`; return wrap; }
+
+  const W = 720, H = height, P = { t: 12, r: 16, b: 26, l: 44 };
+  const xs = live.flatMap(s => s.points.map(p => +p.x));
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const yMax = Math.max(1, ...live.flatMap(s => s.points.map(p => p.y)));
+  const niceMax = niceCeil(yMax);
+  const X = (v) => P.l + ((+v - x0) / Math.max(1, x1 - x0)) * (W - P.l - P.r);
+  const Y = (v) => H - P.b - (v / niceMax) * (H - P.t - P.b);
+
+  const cw = document.createElement("div"); cw.className = "chart-wrap";
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": live.map(s => s.name).join(", ") }, cw);
+
+  for (const t of ticks(niceMax)) {
+    el("line", { x1: P.l, x2: W - P.r, y1: Y(t), y2: Y(t), stroke: C.grid, "stroke-width": 1 }, svg);
+    const lb = el("text", { x: P.l - 8, y: Y(t) + 4, "text-anchor": "end", fill: C.muted, "font-size": 11 }, svg);
+    lb.textContent = compact(t);
+  }
+  el("line", { x1: P.l, x2: W - P.r, y1: H - P.b, y2: H - P.b, stroke: C.base, "stroke-width": 1 }, svg);
+  const dayCount = Math.round((x1 - x0) / 86400000) + 1;
+  const step = Math.max(1, Math.ceil(dayCount / 6));
+  for (let i = 0; i < dayCount; i += step) {
+    const d = new Date(x0 + i * 86400000);
+    const lb = el("text", { x: X(d), y: H - P.b + 16, "text-anchor": "middle", fill: C.muted, "font-size": 11 }, svg);
+    lb.textContent = d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  }
+
+  for (const s of live) {
+    const pts = s.points;
+    const path = pts.map((p, i) => `${i ? "L" : "M"}${X(p.x).toFixed(1)},${Y(p.y).toFixed(1)}`).join(" ");
+    if (area) {
+      el("path", { d: `${path} L${X(pts[pts.length - 1].x).toFixed(1)},${Y(0)} L${X(pts[0].x).toFixed(1)},${Y(0)} Z`, fill: s.color, "fill-opacity": .1, stroke: "none" }, svg);
+    }
+    el("path", { d: path, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+    const last = pts[pts.length - 1];
+    el("circle", { cx: X(last.x), cy: Y(last.y), r: 4, fill: s.color, stroke: C.surface, "stroke-width": 2 }, svg);
+    const lbl = el("text", { x: X(last.x) - 6, y: Y(last.y) - 10, "text-anchor": "end", fill: "#52514e", "font-size": 11, "font-weight": 600 }, svg);
+    lbl.textContent = nf(last.y);
+  }
+
+  const cross = el("line", { y1: P.t, y2: H - P.b, stroke: C.base, "stroke-width": 1, opacity: 0 }, svg);
+  const tip = document.createElement("div"); tip.className = "vtip"; cw.appendChild(tip);
+  const allDates = [...new Set(xs)].sort((a, b) => a - b);
+  function onMove(ev) {
+    const r = svg.getBoundingClientRect();
+    const px = ((ev.clientX - r.left) / r.width) * W;
+    let best = allDates[0], bd = Infinity;
+    for (const d of allDates) { const dd = Math.abs(X(d) - px); if (dd < bd) { bd = dd; best = d; } }
+    cross.setAttribute("x1", X(best)); cross.setAttribute("x2", X(best)); cross.setAttribute("opacity", 1);
+    tip.innerHTML = "";
+    const h = document.createElement("div"); h.className = "vt-h";
+    h.textContent = new Date(best).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+    tip.appendChild(h);
+    for (const s of live) {
+      const p = s.points.find(p => +p.x === best);
+      const row = document.createElement("div"); row.className = "vt-r";
+      const k = document.createElement("span"); k.className = "vt-k"; k.style.background = s.color;
+      const v = document.createElement("span"); v.className = "vt-v"; v.textContent = p ? nf(p.y) : "0";
+      const n = document.createElement("span"); n.className = "vt-n"; n.textContent = s.name;
+      row.append(k, v, n); tip.appendChild(row);
+    }
+    tip.style.opacity = 1;
+    const relX = (X(best) / W) * r.width;
+    tip.style.left = Math.min(Math.max(relX + 12, 4), r.width - tip.offsetWidth - 4) + "px";
+    tip.style.top = "6px";
+  }
+  svg.addEventListener("pointermove", onMove);
+  svg.addEventListener("pointerleave", () => { tip.style.opacity = 0; cross.setAttribute("opacity", 0); });
+  wrap.appendChild(cw);
+
+  if (live.length > 1) {
+    const lg = document.createElement("div"); lg.className = "legend";
+    for (const s of live) {
+      const it = document.createElement("span"); it.className = "it";
+      const sw = document.createElement("span"); sw.className = "sw"; sw.style.background = s.color;
+      const tx = document.createElement("span"); tx.textContent = s.name;
+      it.append(sw, tx); lg.appendChild(it);
+    }
+    wrap.appendChild(lg);
+  }
+  wrap.appendChild(tableToggle(() => {
+    const rows = allDates.map(d => [new Date(d).toLocaleDateString(), ...live.map(s => (s.points.find(p => +p.x === d)?.y ?? 0))]);
+    return { head: ["Date", ...live.map(s => s.name)], rows };
+  }));
+  return wrap;
+}
+function niceCeil(v) {
+  const mag = Math.pow(10, Math.floor(Math.log10(v)));
+  return Math.ceil(v / mag) * mag;
+}
+function ticks(max) { return [0, max / 2, max].map(v => Math.round(v)); }
+
+/* ---- table view toggle (accessibility twin for every chart) ---- */
+function tableToggle(build) {
+  const box = document.createElement("div");
+  const btn = document.createElement("button");
+  btn.className = "tbtn"; btn.textContent = "Show table";
+  btn.style.marginTop = "10px";
+  const host = document.createElement("div");
+  host.className = "hidden";
+  host.style.maxHeight = "260px"; host.style.overflow = "auto"; host.style.marginTop = "8px";
+  btn.addEventListener("click", () => {
+    const open = host.classList.contains("hidden");
+    if (open && !host.dataset.built) {
+      const { head, rows } = build();
+      const t = document.createElement("table"); t.className = "an-table";
+      const th = document.createElement("thead"); const trh = document.createElement("tr");
+      for (const h of head) { const c = document.createElement("th"); c.textContent = h; trh.appendChild(c); }
+      th.appendChild(trh); t.appendChild(th);
+      const tb = document.createElement("tbody");
+      for (const r of rows) {
+        const tr = document.createElement("tr");
+        r.forEach((v, i) => { const td = document.createElement("td"); if (i === 0) td.className = "name"; td.textContent = typeof v === "number" ? nf(v) : v; tr.appendChild(td); });
+        tb.appendChild(tr);
+      }
+      t.appendChild(tb); host.appendChild(t); host.dataset.built = "1";
+    }
+    host.classList.toggle("hidden", !open);
+    btn.textContent = open ? "Hide table" : "Show table";
+  });
+  box.append(btn, host);
+  return box;
+}
+
+/* ---- reply heatmap (day × hour, sequential blue) ---- */
+function heatmap(cells) {
+  const wrap = document.createElement("div");
+  if (!cells.length) { wrap.innerHTML = `<div class="empty-note">No replies recorded in this period.</div>`; return wrap; }
+  const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const grid = new Map();
+  let max = 0;
+  for (const c of cells) { grid.set(`${c.dow}:${c.hour}`, c.n); if (c.n > max) max = c.n; }
+  const W = 720, cellW = (W - 44) / 24, cellH = 20, H = 7 * cellH + 26;
+  const cw = document.createElement("div"); cw.className = "chart-wrap";
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Replies by day and hour" }, cw);
+  const tip = document.createElement("div"); tip.className = "vtip"; cw.appendChild(tip);
+  const bucket = (n) => n === 0 ? -1 : Math.min(C.seq.length - 1, Math.floor((n / max) * C.seq.length * 0.999));
+  for (let d = 1; d <= 7; d++) {
+    const lb = el("text", { x: 38, y: (d - 1) * cellH + 14, "text-anchor": "end", fill: C.muted, "font-size": 11 }, svg);
+    lb.textContent = DOW[d - 1];
+    for (let h = 0; h < 24; h++) {
+      const n = grid.get(`${d}:${h}`) ?? 0;
+      const b = bucket(n);
+      const rect = el("rect", {
+        x: 44 + h * cellW + 1, y: (d - 1) * cellH + 1, width: cellW - 2, height: cellH - 2, rx: 3,
+        fill: b < 0 ? "#f4f6f8" : C.seq[b],
+      }, svg);
+      rect.style.cursor = "default";
+      rect.addEventListener("pointerenter", () => {
+        tip.innerHTML = "";
+        const hd = document.createElement("div"); hd.className = "vt-h";
+        hd.textContent = `${DOW[d - 1]} · ${String(h).padStart(2, "0")}:00–${String((h + 1) % 24).padStart(2, "0")}:00 IST`;
+        const row = document.createElement("div"); row.className = "vt-r";
+        const v = document.createElement("span"); v.className = "vt-v"; v.textContent = nf(n);
+        const nm = document.createElement("span"); nm.className = "vt-n"; nm.textContent = n === 1 ? "reply" : "replies";
+        row.append(v, nm); tip.append(hd, row);
+        tip.style.opacity = 1;
+        const r = svg.getBoundingClientRect();
+        tip.style.left = Math.min(((44 + h * cellW) / W) * r.width + 10, r.width - 150) + "px";
+        tip.style.top = ((d - 1) * cellH / H) * r.height + 4 + "px";
+      });
+      rect.addEventListener("pointerleave", () => { tip.style.opacity = 0; });
+    }
+  }
+  for (let h = 0; h < 24; h += 3) {
+    const lb = el("text", { x: 44 + h * cellW + cellW / 2, y: 7 * cellH + 16, "text-anchor": "middle", fill: C.muted, "font-size": 10 }, svg);
+    lb.textContent = String(h).padStart(2, "0");
+  }
+  wrap.appendChild(cw);
+  const sc = document.createElement("div"); sc.className = "hm-scale";
+  const l0 = document.createElement("span"); l0.textContent = "fewer replies"; sc.appendChild(l0);
+  for (const c of C.seq) { const s = document.createElement("span"); s.className = "sw"; s.style.background = c; sc.appendChild(s); }
+  const l1 = document.createElement("span"); l1.textContent = `more (peak ${nf(max)})`; sc.appendChild(l1);
+  wrap.appendChild(sc);
+  wrap.appendChild(tableToggle(() => ({
+    head: ["Day", "Hour (IST)", "Replies"],
+    rows: cells.slice().sort((a, b) => b.n - a.n).map(c => [DOW[c.dow - 1], String(c.hour).padStart(2, "0") + ":00", c.n]),
+  })));
+  return wrap;
+}
+
+/* ---- sender leaderboard ---- */
+function senderTable(rows) {
+  const wrap = document.createElement("div");
+  if (!rows.length) { wrap.innerHTML = `<div class="empty-note">No sender data yet.</div>`; return wrap; }
+  const max = Math.max(...rows.map(r => Number(r.conversations) || 0), 1);
+  const t = document.createElement("table"); t.className = "an-table";
+  t.innerHTML = `<thead><tr><th>LinkedIn profile</th><th>Conversations</th><th>Replies</th><th>Waiting</th><th>Avg response</th></tr></thead>`;
+  const tb = document.createElement("tbody");
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    const c1 = document.createElement("td"); c1.className = "name"; c1.textContent = r.name ?? "—";
+    const c2 = document.createElement("td"); c2.className = "barcell";
+    const bar = document.createElement("div"); bar.className = "bar";
+    bar.style.width = Math.max(4, (Number(r.conversations) / max) * 100) + "%";
+    const num = document.createElement("div"); num.style.fontWeight = "600"; num.textContent = nf(r.conversations);
+    c2.append(num, bar);
+    const c3 = document.createElement("td"); c3.textContent = nf(r.lead_replies);
+    const c4 = document.createElement("td"); c4.textContent = nf(r.awaiting);
+    const c5 = document.createElement("td"); c5.textContent = dur(r.response_avg_secs);
+    tr.append(c1, c2, c3, c4, c5); tb.appendChild(tr);
+  }
+  t.appendChild(tb); wrap.appendChild(t);
+  return wrap;
+}
+
+/* ---- campaign comparison ---- */
+function campaignTable(rows, perCampaign) {
+  const wrap = document.createElement("div");
+  const t = document.createElement("table"); t.className = "an-table";
+  t.innerHTML = `<thead><tr><th>Campaign</th><th>Status</th><th>Leads</th><th>Messages sent</th><th>Replies</th><th>Reply rate</th><th>Conversations</th><th>Waiting</th></tr></thead>`;
+  const tb = document.createElement("tbody");
+  for (const r of rows) {
+    const kn = perCampaign.find(p => p.routine_num_id === r.routine_num_id) ?? {};
+    const tr = document.createElement("tr");
+    const cells = [
+      [r.name ?? "—", true],
+      [r.status ?? "—", true],
+      [nf(r.stats?.member_count), false],
+      [nf(kn.messages_sent ?? r.stats?.message_sent_count), false],
+      [nf(kn.replies), false],
+      [kn.reply_pct != null ? pct(kn.reply_pct) : "—", false],
+      [nf(r.conversations), false],
+      [nf(r.awaiting), false],
+    ];
+    for (const [v, isName] of cells) { const td = document.createElement("td"); if (isName) td.className = "name"; td.textContent = v; tr.appendChild(td); }
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb); wrap.appendChild(t);
+  return wrap;
+}
+
+/* ================= admin ================= */
 function setupClientSwitch() {
   const sel = $("admin-client-switch");
   if (!state.data.user.is_admin) { sel.classList.add("hidden"); return; }
   api("/api/admin/overview").then((ov) => {
     state.admin = ov;
     sel.innerHTML = "";
-    for (const c of ov.clients) {
-      const o = document.createElement("option");
-      o.value = c.id; o.textContent = "Client: " + c.name;
-      sel.appendChild(o);
-    }
+    for (const c of ov.clients) { const o = document.createElement("option"); o.value = c.id; o.textContent = "Client: " + c.name; sel.appendChild(o); }
     sel.value = state.adminClientId || state.data.client.id;
     sel.classList.toggle("hidden", ov.clients.length < 2);
   }).catch(() => {});
 }
-
 $("admin-client-switch").addEventListener("change", async (e) => {
   state.adminClientId = e.target.value;
-  state.campaign = ""; state.filter = "all";
-  closeThread();
-  await load(true);
+  state.campaign = ""; state.filter = "all"; state.analytics = null;
+  closeThread(); await load(true);
+  if (state.tab === "analytics") loadAnalytics();
 });
-
-$("admin-btn").addEventListener("click", async () => {
-  $("admin-overlay").classList.remove("hidden");
-  await refreshAdmin();
-});
+$("admin-btn").addEventListener("click", async () => { $("admin-overlay").classList.remove("hidden"); await refreshAdmin(); });
 $("admin-close").addEventListener("click", () => $("admin-overlay").classList.add("hidden"));
 $("admin-overlay").addEventListener("click", (e) => { if (e.target.id === "admin-overlay") $("admin-overlay").classList.add("hidden"); });
-
-function adminMsg(text, isError) {
-  const m = $("admin-msg");
-  m.textContent = text; m.className = isError ? "error" : "ok";
-}
+function adminMsg(text, isError) { const m = $("admin-msg"); m.textContent = text; m.className = isError ? "error" : "ok"; }
 
 async function refreshAdmin() {
   try {
     const ov = await api("/api/admin/overview");
     state.admin = ov;
     const cname = (id) => ov.clients.find(c => c.id === id)?.name ?? "?";
-
     $("admin-clients").querySelector("tbody").innerHTML = ov.clients.map(c => `
-      <tr><td>${escapeHtml(c.name)}</td>
+      <tr><td>${esc(c.name)}</td>
       <td>${ov.campaigns.filter(x => x.client_id === c.id).length}</td>
-      <td>${ov.users.filter(u => u.client_id === c.id).length}</td></tr>`).join("");
-
+      <td>${ov.users.filter(u => u.client_id === c.id).length}</td>
+      <td>${c.logo_url ? "✓" : "—"}</td></tr>`).join("");
     $("admin-campaigns").querySelector("tbody").innerHTML = ov.campaigns.map(c => `
-      <tr><td>${escapeHtml(c.name)}</td><td>${escapeHtml(cname(c.client_id))}</td>
-      <td>${escapeHtml(c.status ?? "—")}</td>
+      <tr><td>${esc(c.name)}</td><td>${esc(cname(c.client_id))}</td>
+      <td>${esc(c.status ?? "—")}</td>
       <td>${c.synced_at ? timeAgo(c.synced_at) + " ago" : "never"}</td>
       <td><button class="mini danger" data-unmap="${c.id}">Unmap</button></td></tr>`).join("");
-
-    const clientOpts = ov.clients.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("");
+    const clientOpts = ov.clients.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
     $("admin-available").querySelector("tbody").innerHTML = (ov.available_campaigns ?? []).filter(a => a.encrypted_id).map((a, i) => `
-      <tr><td>${escapeHtml(a.name)}</td>
+      <tr><td>${esc(a.name)}</td>
       <td><select data-mapsel="${i}">${clientOpts}</select></td>
       <td><button class="mini go" data-map="${i}">Map</button></td></tr>`).join("") || `<tr><td colspan="3" style="color:var(--muted)">All Konnector campaigns are mapped.</td></tr>`;
-
     $("admin-users").querySelector("tbody").innerHTML = ov.users.map(u => `
-      <tr><td>${escapeHtml(u.email)}${u.is_admin ? ' <span class="badge camp">admin</span>' : ""}</td>
-      <td>${escapeHtml(cname(u.client_id))}</td>
-      <td>${u.can_reply ? "yes" : "view only"}</td>
+      <tr><td>${esc(u.email)}${u.is_admin ? ' <span class="badge camp">admin</span>' : ""}</td>
+      <td>${esc(cname(u.client_id))}</td><td>${u.can_reply ? "yes" : "view only"}</td>
       <td>${u.campaign_ids?.length ? u.campaign_ids.length + " campaign(s)" : "All campaigns"}</td>
-      <td>${u.is_admin ? "" : `<button class="mini danger" data-deluser="${escapeHtml(u.email)}">Remove</button>`}</td></tr>`).join("");
-
-    const userClientSel = $("new-user-client");
-    userClientSel.innerHTML = clientOpts;
+      <td>${u.is_admin ? "" : `<button class="mini danger" data-deluser="${esc(u.email)}">Remove</button>`}</td></tr>`).join("");
+    $("new-user-client").innerHTML = clientOpts;
+    $("logo-client").innerHTML = clientOpts;
     renderAdminCampChecks();
 
     $("admin-campaigns").querySelectorAll("[data-unmap]").forEach(b => b.addEventListener("click", async () => {
       if (!confirm("Unmap this campaign? Its synced conversations will be removed from the dashboard.")) return;
-      try { await api("/api/admin/campaigns/unmap", { method: "POST", body: JSON.stringify({ campaign_id: b.dataset.unmap }) }); adminMsg("Campaign unmapped."); await refreshAdmin(); await load(true); }
+      try { await api("/api/admin/campaigns/unmap", { method: "POST", body: JSON.stringify({ campaign_id: b.dataset.unmap }) }); adminMsg("Campaign unmapped."); await refreshAdmin(); state.analytics = null; await load(true); }
       catch (e) { adminMsg("Unmap failed: " + e.message, true); }
     }));
     $("admin-available").querySelectorAll("[data-map]").forEach(b => b.addEventListener("click", async () => {
@@ -708,7 +1200,7 @@ async function refreshAdmin() {
       b.disabled = true; b.textContent = "Mapping…";
       try {
         await api("/api/admin/campaigns/map", { method: "POST", body: JSON.stringify({ encrypted_id: a.encrypted_id, name: a.name, client_id: clientId }) });
-        adminMsg(`Mapped "${a.name}" — backfill running in the background (check Synced column in ~1 min).`);
+        adminMsg(`Mapped "${a.name}" — backfill running in the background (check the Synced column in ~1 min).`);
         await refreshAdmin();
       } catch (e) { adminMsg("Map failed: " + e.message, true); b.disabled = false; b.textContent = "Map"; }
     }));
@@ -717,28 +1209,28 @@ async function refreshAdmin() {
       try { await api("/api/admin/users/delete", { method: "POST", body: JSON.stringify({ email: b.dataset.deluser }) }); adminMsg("User removed."); await refreshAdmin(); }
       catch (e) { adminMsg("Remove failed: " + e.message, true); }
     }));
-  } catch (e) {
-    adminMsg("Could not load admin data: " + e.message, true);
-  }
+  } catch (e) { adminMsg("Could not load admin data: " + e.message, true); }
 }
-
 function renderAdminCampChecks() {
   const clientId = $("new-user-client").value;
   const box = $("admin-camp-checks");
   const camps = (state.admin?.campaigns ?? []).filter(c => c.client_id === clientId);
-  if (!camps.length) { box.innerHTML = '<em style="color:var(--muted)">This client has no campaigns yet — user will see all future ones.</em>'; return; }
+  if (!camps.length) { box.innerHTML = '<em style="color:var(--muted)">This client has no campaigns yet — the user will see all future ones.</em>'; return; }
   box.innerHTML = '<em style="color:var(--muted)">Campaign access (none ticked = all campaigns):</em>' +
-    camps.map(c => `<label><input type="checkbox" value="${c.id}" class="camp-check"> ${escapeHtml(c.name)}</label>`).join("");
+    camps.map(c => `<label><input type="checkbox" value="${c.id}" class="camp-check"> ${esc(c.name)}</label>`).join("");
 }
 $("new-user-client").addEventListener("change", renderAdminCampChecks);
-
 $("add-client-btn").addEventListener("click", async () => {
   const name = $("new-client-name").value.trim();
   if (!name) return adminMsg("Enter a client name.", true);
   try { await api("/api/admin/clients", { method: "POST", body: JSON.stringify({ name }) }); $("new-client-name").value = ""; adminMsg("Client added."); await refreshAdmin(); setupClientSwitch(); }
   catch (e) { adminMsg("Add failed: " + e.message, true); }
 });
-
+$("set-logo-btn").addEventListener("click", async () => {
+  const client_id = $("logo-client").value, logo_url = $("logo-url").value.trim();
+  try { await api("/api/admin/clients/logo", { method: "POST", body: JSON.stringify({ client_id, logo_url }) }); adminMsg("Logo updated."); $("logo-url").value = ""; await refreshAdmin(); await load(true); }
+  catch (e) { adminMsg("Logo update failed: " + (e.body?.error ?? e.message), true); }
+});
 $("add-user-btn").addEventListener("click", async () => {
   const email = $("new-user-email").value.trim().toLowerCase();
   const clientId = $("new-user-client").value;
@@ -746,17 +1238,15 @@ $("add-user-btn").addEventListener("click", async () => {
   const campaignIds = [...document.querySelectorAll(".camp-check:checked")].map(c => c.value);
   try {
     await api("/api/admin/users", { method: "POST", body: JSON.stringify({ email, client_id: clientId, can_reply: $("new-user-reply").checked, campaign_ids: campaignIds }) });
-    $("new-user-email").value = "";
-    adminMsg("User saved. They can now log in with " + email + ".");
+    $("new-user-email").value = ""; adminMsg("User saved. They can now sign in with " + email + ".");
     await refreshAdmin();
   } catch (e) { adminMsg("Save failed: " + e.message, true); }
 });
 
-/* ---------------- boot ---------------- */
+/* ================= boot ================= */
 (async () => {
   const { data } = await sb.auth.getSession();
-  if (data?.session) startApp();
-  else showLogin();
+  if (data?.session) startApp(); else showLogin();
 })();
 </script>
 </body>
