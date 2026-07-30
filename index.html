@@ -1,0 +1,784 @@
+<!doctype html>
+<!--
+  LinkedIn Client Inbox (Konnector-backed) — static UI for the Supabase edge function API.
+
+  API (base: https://qypevxpscdhdrzlelolt.supabase.co/functions/v1/inbox):
+    GET  /api/inbox?[campaign_id=][&client_id=]   Bearer JWT -> {client,user,campaigns,conversations}
+    GET  /api/thread?id=<conversation_id>          Bearer JWT -> {conversation,campaign,messages}
+    POST /api/reply {conversation_id, body}        Bearer JWT + can_reply -> {ok}
+    GET  /api/admin/overview                       Bearer JWT + is_admin
+    POST /api/admin/clients {name}
+    POST /api/admin/campaigns/map {encrypted_id,name,client_id}
+    POST /api/admin/campaigns/unmap {campaign_id}
+    POST /api/admin/users {email,client_id,can_reply,campaign_ids}
+    POST /api/admin/users/delete {email}
+  Auth: Supabase email OTP (magic link or 6-digit code). Whitelist lives in client_users.
+  Agent hooks: window.INBOX_API_BASE, <script id="inbox-data"> mirrors state, rows carry data-* attrs.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>LinkedIn Inbox</title>
+<style>
+  :root{
+    --blue:#0a66c2; --blue-dark:#004182; --blue-soft:#eaf2fb;
+    --bg:#f3f5f7; --card:#ffffff; --line:#e4e8ec; --text:#1c1e21; --muted:#5f6b76;
+    --green:#0c7a43; --green-soft:#e6f4ec; --amber:#8a5b00; --amber-soft:#fdf3dd;
+    --red:#b3261e; --radius:12px; --shadow:0 1px 2px rgba(20,30,40,.06),0 4px 14px rgba(20,30,40,.05);
+    font-size:15px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text)}
+  button{font:inherit;cursor:pointer}
+  input,textarea,select{font:inherit}
+  a{color:var(--blue)}
+  .hidden{display:none!important}
+
+  /* ---------- login ---------- */
+  #login-view{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .login-card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:34px;width:100%;max-width:400px}
+  .login-card h1{font-size:1.25rem;margin:0 0 4px}
+  .login-card p{color:var(--muted);margin:0 0 20px;font-size:.92rem}
+  .brand-dot{display:inline-flex;align-items:center;gap:8px;font-weight:700;color:var(--blue);margin-bottom:14px}
+  .brand-dot svg{flex:none}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:.8rem;font-weight:600;color:var(--muted);margin-bottom:5px}
+  .field input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:#fff}
+  .btn{border:0;border-radius:9px;padding:10px 16px;font-weight:600}
+  .btn-primary{background:var(--blue);color:#fff;width:100%}
+  .btn-primary:disabled{opacity:.55;cursor:default}
+  .btn-ghost{background:transparent;color:var(--blue)}
+  .login-msg{font-size:.88rem;margin-top:12px;color:var(--muted)}
+  .login-msg.error{color:var(--red)}
+  #code-row{display:flex;gap:8px}
+  #code-row input{flex:1;letter-spacing:.25em;text-align:center}
+  #code-row .btn{white-space:nowrap}
+
+  /* ---------- app frame ---------- */
+  #app-view{display:flex;flex-direction:column;height:100vh}
+  header{background:var(--card);border-bottom:1px solid var(--line);padding:10px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .logo-box{display:flex;align-items:center;gap:10px;min-width:0}
+  .logo-box img{max-width:148px;max-height:34px;display:block}
+  .logo-fallback{width:34px;height:34px;border-radius:8px;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700}
+  .logo-title{font-weight:700;white-space:nowrap}
+  .logo-sub{font-size:.75rem;color:var(--muted);display:flex;align-items:center;gap:5px}
+  .logo-sub svg{flex:none}
+  header .spacer{flex:1}
+  header select{padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:#fff;max-width:280px}
+  .hbtn{border:1px solid var(--line);background:#fff;border-radius:9px;padding:7px 12px;font-weight:600;color:var(--text)}
+  .hbtn.blue{color:var(--blue);border-color:#c4d9ef}
+  .who{font-size:.8rem;color:var(--muted);max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* ---------- stats ---------- */
+  #stats{display:flex;gap:10px;padding:12px 18px 0;flex-wrap:wrap}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:10px 16px;min-width:118px;box-shadow:var(--shadow)}
+  .tile .n{font-size:1.25rem;font-weight:700}
+  .tile .l{font-size:.75rem;color:var(--muted)}
+
+  /* ---------- main ---------- */
+  main{flex:1;display:flex;min-height:0;padding:12px 18px 18px;gap:14px}
+  #list-pane{width:410px;flex:none;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);min-height:0}
+  #chips{display:flex;gap:6px;padding:10px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .chip{border:1px solid var(--line);background:#fff;border-radius:999px;padding:4px 11px;font-size:.8rem;font-weight:600;color:var(--muted)}
+  .chip.active{background:var(--blue);border-color:var(--blue);color:#fff}
+  .chip .c{opacity:.75;font-weight:500}
+  #search-row{padding:8px 12px;border-bottom:1px solid var(--line)}
+  #search{width:100%;padding:8px 11px;border:1px solid var(--line);border-radius:9px}
+  #conv-list{flex:1;overflow-y:auto;min-height:0}
+  .row{display:flex;gap:10px;padding:11px 13px;border-bottom:1px solid var(--line);cursor:pointer}
+  .row:hover{background:#f8fafc}
+  .row.sel{background:var(--blue-soft)}
+  .avatar{width:42px;height:42px;border-radius:50%;flex:none;background:#d7dee5;color:#5a6570;display:flex;align-items:center;justify-content:center;font-weight:700;overflow:hidden}
+  .avatar img{width:100%;height:100%;object-fit:cover}
+  .row-main{flex:1;min-width:0}
+  .row-top{display:flex;align-items:baseline;gap:8px}
+  .row-name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row-time{margin-left:auto;font-size:.72rem;color:var(--muted);flex:none}
+  .row-occ{font-size:.76rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:1px 0 3px}
+  .row-preview{font-size:.82rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row-preview.unreplied{color:var(--text);font-weight:500}
+  .badges{display:flex;gap:5px;margin-top:5px;flex-wrap:wrap}
+  .badge{font-size:.68rem;font-weight:600;border-radius:6px;padding:1.5px 7px}
+  .badge.await{background:var(--amber-soft);color:var(--amber)}
+  .badge.camp{background:var(--blue-soft);color:var(--blue-dark)}
+  .badge.via{background:#eef1f4;color:var(--muted)}
+  #list-empty{padding:40px 20px;text-align:center;color:var(--muted);font-size:.9rem}
+
+  /* ---------- thread ---------- */
+  #thread-pane{flex:1;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);min-width:0;min-height:0}
+  #thread-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:.95rem}
+  #thread-head{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+  #thread-head .avatar{width:40px;height:40px}
+  .th-name{font-weight:700}
+  .th-name a{color:inherit;text-decoration:none}
+  .th-name a:hover{color:var(--blue)}
+  .th-sub{font-size:.78rem;color:var(--muted);margin-top:1px}
+  #back-btn{display:none}
+  #msgs{flex:1;overflow-y:auto;padding:18px 16px;min-height:0;background:#fbfcfd}
+  .msg{max-width:74%;margin-bottom:12px;display:flex;flex-direction:column}
+  .msg .bubble{padding:9px 13px;border-radius:14px;font-size:.9rem;line-height:1.42;white-space:pre-wrap;word-break:break-word}
+  .msg.in{align-items:flex-start}
+  .msg.in .bubble{background:#eef1f4;border-bottom-left-radius:5px}
+  .msg.out{align-items:flex-end;margin-left:auto}
+  .msg.out .bubble{background:var(--blue);color:#fff;border-bottom-right-radius:5px}
+  .msg .meta{font-size:.68rem;color:var(--muted);margin-top:3px;padding:0 4px}
+  #composer{border-top:1px solid var(--line);padding:12px 16px}
+  #composer textarea{width:100%;min-height:84px;max-height:34vh;padding:10px 12px;border:1px solid var(--line);border-radius:10px;resize:vertical}
+  #composer .c-row{display:flex;align-items:center;gap:10px;margin-top:8px}
+  #composer .note{font-size:.75rem;color:var(--muted);flex:1}
+  #send-btn{background:var(--blue);color:#fff;border:0;border-radius:9px;padding:9px 22px;font-weight:600}
+  #send-btn:disabled{opacity:.5;cursor:default}
+  #send-msg{font-size:.8rem}
+  #send-msg.error{color:var(--red)}
+  #send-msg.ok{color:var(--green)}
+
+  /* ---------- admin ---------- */
+  #admin-overlay{position:fixed;inset:0;background:rgba(15,25,35,.45);display:flex;align-items:flex-start;justify-content:center;padding:30px 16px;overflow-y:auto;z-index:50}
+  #admin-panel{background:var(--card);border-radius:16px;max-width:860px;width:100%;padding:22px 26px;box-shadow:0 12px 40px rgba(0,0,0,.22)}
+  #admin-panel h2{margin:0 0 4px;font-size:1.1rem}
+  #admin-panel h3{margin:20px 0 8px;font-size:.95rem}
+  #admin-panel table{width:100%;border-collapse:collapse;font-size:.85rem}
+  #admin-panel th{text-align:left;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;padding:6px 8px;border-bottom:1px solid var(--line)}
+  #admin-panel td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  .mini{font-size:.78rem;padding:4px 10px;border-radius:7px;border:1px solid var(--line);background:#fff}
+  .mini.danger{color:var(--red);border-color:#eccfcd}
+  .mini.go{color:#fff;background:var(--blue);border-color:var(--blue)}
+  .form-inline{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+  .form-inline input[type=text],.form-inline input[type=email],.form-inline select{padding:7px 10px;border:1px solid var(--line);border-radius:8px}
+  #admin-camp-checks{display:flex;flex-direction:column;gap:4px;font-size:.83rem;margin:6px 0;padding:8px 10px;border:1px dashed var(--line);border-radius:8px}
+  #admin-msg{font-size:.83rem;margin-top:10px}
+  #admin-msg.error{color:var(--red)}
+  #admin-msg.ok{color:var(--green)}
+  .admin-close{float:right;border:0;background:transparent;font-size:1.3rem;line-height:1;color:var(--muted)}
+
+  /* ---------- responsive ---------- */
+  @media (max-width: 860px){
+    main{padding:10px;gap:0}
+    #list-pane{width:100%}
+    #thread-pane{display:none;position:fixed;inset:0;border-radius:0;z-index:40}
+    body.thread-open #thread-pane{display:flex}
+    body.thread-open #list-pane{display:none}
+    #back-btn{display:inline-flex}
+    #stats{padding:10px 10px 0;gap:8px}
+    .tile{min-width:calc(33% - 8px);padding:8px 12px}
+    header{padding:10px 12px;gap:8px}
+    .who{display:none}
+  }
+</style>
+</head>
+<body>
+
+<!-- ======================= LOGIN ======================= -->
+<div id="login-view">
+  <div class="login-card">
+    <div class="brand-dot">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="#0a66c2"><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.86 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.56V9h3.56v11.45z"/></svg>
+      LinkedIn Inbox
+    </div>
+    <h1>Sign in</h1>
+    <p>Enter your work email. We'll send you a login link and a 6-digit code.</p>
+    <div class="field">
+      <label for="login-email">Email</label>
+      <input id="login-email" type="email" autocomplete="email" placeholder="you@company.com">
+    </div>
+    <button id="login-btn" class="btn btn-primary">Email me a login link</button>
+    <div id="code-block" class="hidden">
+      <div class="field" style="margin-top:14px">
+        <label for="login-code">Or paste the 6-digit code from the email</label>
+        <div id="code-row">
+          <input id="login-code" inputmode="numeric" maxlength="6" placeholder="••••••">
+          <button id="code-btn" class="btn btn-primary" style="width:auto">Verify</button>
+        </div>
+      </div>
+    </div>
+    <div id="login-msg" class="login-msg"></div>
+  </div>
+</div>
+
+<!-- ======================= APP ======================= -->
+<div id="app-view" class="hidden">
+  <header>
+    <div class="logo-box">
+      <span id="client-logo"></span>
+      <div>
+        <div class="logo-title" id="client-name" data-role="client-name">…</div>
+        <div class="logo-sub">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="#0a66c2"><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.86 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.56V9h3.56v11.45z"/></svg>
+          LinkedIn Inbox
+        </div>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <select id="admin-client-switch" class="hidden" title="View as client"></select>
+    <select id="campaign-select" data-role="campaign-select"><option value="">All campaigns</option></select>
+    <button id="refresh-btn" class="hbtn" title="Refresh">↻ Refresh</button>
+    <button id="admin-btn" class="hbtn blue hidden">Admin</button>
+    <span class="who" id="who"></span>
+    <button id="logout-btn" class="hbtn">Log out</button>
+  </header>
+
+  <div id="stats" data-role="stats"></div>
+
+  <main>
+    <section id="list-pane">
+      <div id="chips" data-role="chips"></div>
+      <div id="search-row"><input id="search" type="search" placeholder="Search name, company, message…" autocomplete="off"></div>
+      <div id="conv-list" data-role="conversation-list"></div>
+    </section>
+
+    <section id="thread-pane">
+      <div id="thread-placeholder">Select a conversation to read it</div>
+      <div id="thread-content" class="hidden" style="display:flex;flex-direction:column;flex:1;min-height:0">
+        <div id="thread-head">
+          <button id="back-btn" class="hbtn">←</button>
+          <span class="avatar" id="th-avatar"></span>
+          <div style="min-width:0">
+            <div class="th-name" id="th-name"></div>
+            <div class="th-sub" id="th-sub"></div>
+          </div>
+        </div>
+        <div id="msgs" data-role="messages"></div>
+        <div id="composer" class="hidden">
+          <textarea id="reply-text" placeholder="Write a reply…" maxlength="7900"></textarea>
+          <div class="c-row">
+            <span class="note" id="reply-note"></span>
+            <span id="send-msg"></span>
+            <button id="send-btn">Send reply</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ======================= ADMIN ======================= -->
+<div id="admin-overlay" class="hidden">
+  <div id="admin-panel">
+    <button class="admin-close" id="admin-close">×</button>
+    <h2>Admin</h2>
+    <div style="color:var(--muted);font-size:.85rem">Clients, campaign mapping and user access for the LinkedIn inbox.</div>
+
+    <h3>Clients</h3>
+    <table id="admin-clients"><thead><tr><th>Name</th><th>Campaigns</th><th>Users</th></tr></thead><tbody></tbody></table>
+    <div class="form-inline">
+      <input type="text" id="new-client-name" placeholder="New client name">
+      <button class="mini go" id="add-client-btn">Add client</button>
+    </div>
+
+    <h3>Mapped campaigns</h3>
+    <table id="admin-campaigns"><thead><tr><th>Campaign</th><th>Client</th><th>Status</th><th>Synced</th><th></th></tr></thead><tbody></tbody></table>
+
+    <h3>Available Konnector campaigns (not mapped)</h3>
+    <table id="admin-available"><thead><tr><th>Campaign</th><th>Map to</th><th></th></tr></thead><tbody></tbody></table>
+
+    <h3>Users</h3>
+    <table id="admin-users"><thead><tr><th>Email</th><th>Client</th><th>Reply</th><th>Access</th><th></th></tr></thead><tbody></tbody></table>
+    <div class="form-inline">
+      <input type="email" id="new-user-email" placeholder="user@email.com">
+      <select id="new-user-client"></select>
+      <label style="font-size:.83rem"><input type="checkbox" id="new-user-reply" checked> can reply</label>
+    </div>
+    <div id="admin-camp-checks"><em style="color:var(--muted)">Pick a client to choose campaign access (none ticked = all campaigns)</em></div>
+    <div class="form-inline"><button class="mini go" id="add-user-btn">Add / update user</button></div>
+
+    <div id="admin-msg"></div>
+  </div>
+</div>
+
+<script id="inbox-data" type="application/json">{}</script>
+<script type="module">
+import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+
+const SUPABASE_URL = "https://qypevxpscdhdrzlelolt.supabase.co";
+const ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF5cGV2eHBzY2RoZHJ6bGVsb2x0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU0MDE0NjYsImV4cCI6MjEwMDk3NzQ2Nn0.DsagYyW2kbvWOtBt-XUh8ube4YbFc2snbROLCIBxs5Y";
+const API = SUPABASE_URL + "/functions/v1/inbox";
+window.INBOX_API_BASE = API;
+
+const sb = createClient(SUPABASE_URL, ANON_KEY, { auth: { detectSessionInUrl: true, flowType: "implicit" } });
+
+const $ = (id) => document.getElementById(id);
+const state = {
+  data: null, filter: "all", search: "", campaign: "", thread: null,
+  adminClientId: "", appStarted: false, refreshTimer: null, admin: null,
+};
+
+function mirror() {
+  try {
+    $("inbox-data").textContent = JSON.stringify({
+      campaign: state.campaign, filter: state.filter, search: state.search,
+      thread_id: state.thread?.conversation?.id ?? null,
+      conversations: state.data?.conversations?.length ?? 0,
+      user: state.data?.user ?? null,
+    });
+  } catch {}
+}
+
+async function token() {
+  const { data } = await sb.auth.getSession();
+  return data?.session?.access_token ?? null;
+}
+
+async function api(path, opts = {}) {
+  const t = await token();
+  if (!t) throw Object.assign(new Error("no session"), { status: 401 });
+  const url = new URL(API + path);
+  if (state.adminClientId) url.searchParams.set("client_id", state.adminClientId);
+  const res = await fetch(url, {
+    ...opts,
+    headers: { Authorization: "Bearer " + t, "Content-Type": "application/json", ...(opts.headers ?? {}) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(body.error ?? res.status), { status: res.status, body });
+  return body;
+}
+
+/* ---------------- login ---------------- */
+function showLogin(msg, isError) {
+  state.appStarted = false;
+  if (state.refreshTimer) { clearInterval(state.refreshTimer); state.refreshTimer = null; }
+  $("app-view").classList.add("hidden");
+  $("login-view").classList.remove("hidden");
+  if (msg) { const m = $("login-msg"); m.textContent = msg; m.className = "login-msg" + (isError ? " error" : ""); }
+}
+
+$("login-btn").addEventListener("click", async () => {
+  const email = $("login-email").value.trim().toLowerCase();
+  const m = $("login-msg");
+  if (!email || !email.includes("@")) { m.textContent = "Enter a valid email."; m.className = "login-msg error"; return; }
+  $("login-btn").disabled = true;
+  m.textContent = "Sending…"; m.className = "login-msg";
+  const { error } = await sb.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: location.origin + location.pathname },
+  });
+  $("login-btn").disabled = false;
+  if (error) { m.textContent = error.message; m.className = "login-msg error"; return; }
+  m.textContent = "Check your email — click the link, or paste the 6-digit code below.";
+  $("code-block").classList.remove("hidden");
+});
+
+$("code-btn").addEventListener("click", async () => {
+  const email = $("login-email").value.trim().toLowerCase();
+  const code = $("login-code").value.trim();
+  const m = $("login-msg");
+  if (code.length < 6) { m.textContent = "Enter the 6-digit code."; m.className = "login-msg error"; return; }
+  $("code-btn").disabled = true;
+  const { error } = await sb.auth.verifyOtp({ email, token: code, type: "email" });
+  $("code-btn").disabled = false;
+  if (error) { m.textContent = error.message; m.className = "login-msg error"; return; }
+});
+
+$("logout-btn").addEventListener("click", async () => {
+  await sb.auth.signOut();
+  state.data = null; state.filter = "all"; state.search = ""; state.campaign = "";
+  state.thread = null; state.adminClientId = ""; state.admin = null;
+  $("search").value = ""; $("admin-btn").classList.add("hidden");
+  $("admin-client-switch").classList.add("hidden");
+  $("admin-overlay").classList.add("hidden");
+  document.body.classList.remove("thread-open");
+  closeThread();
+  showLogin("Signed out.");
+});
+
+sb.auth.onAuthStateChange((_event, session) => {
+  if (session && !state.appStarted) startApp();
+});
+
+/* ---------------- app ---------------- */
+async function startApp() {
+  state.appStarted = true;
+  $("login-view").classList.add("hidden");
+  $("app-view").classList.remove("hidden");
+  try {
+    await load();
+    if (!state.refreshTimer) state.refreshTimer = setInterval(() => load(true), 120000);
+  } catch (e) {
+    if (e.status === 403) showLogin("This email doesn't have access to the dashboard. Ask your admin to add you.", true);
+    else if (e.status === 401) showLogin("Session expired — sign in again.", true);
+    else showLogin("Could not load the inbox: " + e.message, true);
+  }
+}
+
+async function load(silent) {
+  const qs = state.campaign ? "?campaign_id=" + encodeURIComponent(state.campaign) : "";
+  const data = await api("/api/inbox" + (qs ? qs : ""));
+  state.data = data;
+  renderHeader(); renderStats(); renderChips(); renderList();
+  mirror();
+  if (!silent && data.user?.is_admin) {
+    $("admin-btn").classList.remove("hidden");
+    setupClientSwitch();
+  }
+}
+
+function renderHeader() {
+  const c = state.data.client;
+  $("client-name").textContent = c.name;
+  $("who").textContent = state.data.user.email;
+  const box = $("client-logo");
+  box.innerHTML = "";
+  if (c.logo_url) {
+    const img = document.createElement("img");
+    img.src = c.logo_url; img.alt = c.name;
+    img.onerror = () => { box.innerHTML = `<span class="logo-fallback">${(c.name || "?")[0].toUpperCase()}</span>`; };
+    box.appendChild(img);
+  } else {
+    box.innerHTML = `<span class="logo-fallback">${(c.name || "?")[0].toUpperCase()}</span>`;
+  }
+  const sel = $("campaign-select");
+  const prev = state.campaign;
+  sel.innerHTML = '<option value="">All campaigns</option>';
+  for (const camp of state.data.campaigns) {
+    const o = document.createElement("option");
+    o.value = camp.id; o.textContent = camp.name;
+    sel.appendChild(o);
+  }
+  sel.value = prev && [...sel.options].some(o => o.value === prev) ? prev : "";
+  state.campaign = sel.value;
+  sel.parentElement.classList.toggle("hidden", false);
+}
+
+function fmtN(n) { return (n === null || n === undefined) ? "—" : Number(n).toLocaleString(); }
+
+function renderStats() {
+  const wrap = $("stats");
+  wrap.innerHTML = "";
+  const camps = state.campaign
+    ? state.data.campaigns.filter(c => c.id === state.campaign)
+    : state.data.campaigns;
+  const sum = (k) => {
+    let any = false, total = 0;
+    for (const c of camps) { const v = c.stats?.[k]; if (v !== null && v !== undefined) { any = true; total += Number(v); } }
+    return any ? total : null;
+  };
+  const convs = state.data.conversations.filter(cv => !state.campaign || cv.campaign_id === state.campaign);
+  const tiles = [
+    ["Leads in campaign", sum("member_count")],
+    ["Invites sent", sum("friend_request_count")],
+    ["Invites accepted", sum("friend_accept_count")],
+    ["Messages sent", sum("message_sent_count")],
+    ["Conversations", convs.length],
+    ["Awaiting your reply", convs.filter(c => c.last_direction === "REPLY").length],
+  ];
+  for (const [label, val] of tiles) {
+    if (val === null) continue;
+    const d = document.createElement("div");
+    d.className = "tile"; d.dataset.stat = label;
+    d.innerHTML = `<div class="n">${fmtN(val)}</div><div class="l">${label}</div>`;
+    wrap.appendChild(d);
+  }
+}
+
+function filteredConvs() {
+  const q = state.search.toLowerCase();
+  return state.data.conversations.filter(cv => {
+    if (state.campaign && cv.campaign_id !== state.campaign) return false;
+    if (state.filter === "needs_reply" && cv.last_direction !== "REPLY") return false;
+    if (state.filter === "handled" && cv.last_direction !== "SENT") return false;
+    if (q) {
+      const hay = [cv.profile?.name, cv.profile?.company_name, cv.profile?.occupation, cv.last_message_preview, cv.sender_name].join(" ").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+function renderChips() {
+  const inScope = state.data.conversations.filter(cv => !state.campaign || cv.campaign_id === state.campaign);
+  const chips = [
+    ["all", "All", inScope.length],
+    ["needs_reply", "Needs reply", inScope.filter(c => c.last_direction === "REPLY").length],
+    ["handled", "Replied", inScope.filter(c => c.last_direction === "SENT").length],
+  ];
+  const wrap = $("chips");
+  wrap.innerHTML = "";
+  for (const [key, label, count] of chips) {
+    const b = document.createElement("button");
+    b.className = "chip" + (state.filter === key ? " active" : "");
+    b.dataset.filter = key;
+    b.innerHTML = `${label} <span class="c">${count}</span>`;
+    b.addEventListener("click", () => { state.filter = key; renderChips(); renderList(); mirror(); });
+    wrap.appendChild(b);
+  }
+}
+
+function timeAgo(iso) {
+  if (!iso) return "";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 3600) return Math.max(1, Math.floor(s / 60)) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  if (s < 7 * 86400) return Math.floor(s / 86400) + "d";
+  return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
+function initials(name) { return (name || "?").split(/\s+/).slice(0, 2).map(w => w[0] ?? "").join("").toUpperCase(); }
+
+function campName(id) { return state.data.campaigns.find(c => c.id === id)?.name ?? ""; }
+
+function renderList() {
+  const wrap = $("conv-list");
+  wrap.innerHTML = "";
+  const rows = filteredConvs();
+  if (!rows.length) {
+    wrap.innerHTML = `<div id="list-empty">No conversations here yet.</div>`;
+    return;
+  }
+  for (const cv of rows) {
+    const div = document.createElement("div");
+    div.className = "row" + (state.thread?.conversation?.id === cv.id ? " sel" : "");
+    div.dataset.conversationId = cv.id;
+    div.dataset.direction = cv.last_direction ?? "";
+    const img = cv.profile?.image ? `<img src="${cv.profile.image}" alt="" onerror="this.remove()">` : "";
+    const await_ = cv.last_direction === "REPLY" ? `<span class="badge await">Awaiting your reply</span>` : "";
+    const campBadge = !state.campaign && state.data.campaigns.length > 1 ? `<span class="badge camp">${escapeHtml(shorten(campName(cv.campaign_id), 30))}</span>` : "";
+    div.innerHTML = `
+      <span class="avatar">${img}${img ? "" : initials(cv.profile?.name)}</span>
+      <div class="row-main">
+        <div class="row-top">
+          <span class="row-name">${escapeHtml(cv.profile?.name ?? "Unknown")}</span>
+          <span class="row-time">${timeAgo(cv.last_message_at)}</span>
+        </div>
+        <div class="row-occ">${escapeHtml(cv.profile?.occupation ?? "")}</div>
+        <div class="row-preview ${cv.last_direction === "REPLY" ? "unreplied" : ""}">${cv.last_direction === "SENT" ? "You: " : ""}${escapeHtml(cv.last_message_preview ?? "")}</div>
+        <div class="badges">${await_}${campBadge}<span class="badge via">via ${escapeHtml(cv.sender_name ?? "?")}</span></div>
+      </div>`;
+    div.addEventListener("click", () => openThread(cv.id));
+    wrap.appendChild(div);
+  }
+}
+
+function shorten(s, n) { return (s ?? "").length > n ? s.slice(0, n - 1) + "…" : (s ?? ""); }
+function escapeHtml(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+/* ---------------- thread ---------------- */
+function closeThread() {
+  state.thread = null;
+  $("thread-content").classList.add("hidden");
+  $("thread-placeholder").classList.remove("hidden");
+  document.body.classList.remove("thread-open");
+}
+
+$("back-btn").addEventListener("click", () => { closeThread(); renderList(); });
+
+async function openThread(id) {
+  try {
+    const t = await api("/api/thread?id=" + encodeURIComponent(id));
+    state.thread = t;
+    renderThread();
+    renderList();
+    document.body.classList.add("thread-open");
+    mirror();
+  } catch (e) {
+    alert("Could not open the conversation: " + e.message);
+  }
+}
+
+function renderThread() {
+  const { conversation: cv, campaign, messages } = state.thread;
+  $("thread-placeholder").classList.add("hidden");
+  $("thread-content").classList.remove("hidden");
+  const av = $("th-avatar");
+  av.innerHTML = cv.profile?.image ? `<img src="${cv.profile.image}" alt="" onerror="this.remove()">` : initials(cv.profile?.name);
+  const link = cv.profile?.profile_url
+    ? `<a href="${cv.profile.profile_url}" target="_blank" rel="noopener">${escapeHtml(cv.profile?.name ?? "")}</a>`
+    : escapeHtml(cv.profile?.name ?? "");
+  $("th-name").innerHTML = link;
+  const bits = [cv.profile?.occupation, campaign?.name, "via " + (cv.sender_name ?? "?")].filter(Boolean);
+  $("th-sub").textContent = bits.join("  ·  ");
+
+  const box = $("msgs");
+  box.innerHTML = "";
+  for (const m of messages) {
+    const isOut = m.direction === "SENT";
+    const who = isOut ? (cv.sender_name ?? "You") : (cv.profile?.name ?? "Lead");
+    const d = document.createElement("div");
+    d.className = "msg " + (isOut ? "out" : "in");
+    d.dataset.type = m.type;
+    d.innerHTML = `<div class="bubble">${escapeHtml(m.body)}</div>
+      <div class="meta">${escapeHtml(who)} · ${new Date(m.at).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}${m.type === "dashboard_reply" ? " · dashboard" : ""}</div>`;
+    box.appendChild(d);
+  }
+  box.scrollTop = box.scrollHeight;
+
+  const composer = $("composer");
+  if (state.data.user.can_reply) {
+    composer.classList.remove("hidden");
+    $("reply-note").textContent = `Sends from ${cv.sender_name ?? "the campaign sender"}'s LinkedIn profile`;
+    $("send-msg").textContent = "";
+    $("reply-text").value = "";
+  } else {
+    composer.classList.add("hidden");
+  }
+}
+
+$("send-btn").addEventListener("click", async () => {
+  const text = $("reply-text").value.trim();
+  const m = $("send-msg");
+  if (!text) { m.textContent = "Write a message first."; m.className = "error"; return; }
+  $("send-btn").disabled = true;
+  m.textContent = "Sending…"; m.className = "";
+  try {
+    await api("/api/reply", { method: "POST", body: JSON.stringify({ conversation_id: state.thread.conversation.id, body: text }) });
+    m.textContent = "Sent ✓"; m.className = "ok";
+    $("reply-text").value = "";
+    await openThread(state.thread.conversation.id);
+    await load(true);
+  } catch (e) {
+    m.textContent = "Failed: " + (e.body?.error ?? e.message); m.className = "error";
+  } finally {
+    $("send-btn").disabled = false;
+  }
+});
+
+/* ---------------- search & controls ---------------- */
+$("search").addEventListener("input", (e) => { state.search = e.target.value; renderList(); mirror(); });
+$("campaign-select").addEventListener("change", async (e) => {
+  state.campaign = e.target.value;
+  closeThread();
+  await load(true);
+});
+$("refresh-btn").addEventListener("click", async () => {
+  const b = $("refresh-btn");
+  b.disabled = true; const old = b.textContent; b.textContent = "Refreshing…";
+  const started = Date.now();
+  try { await load(true); } catch {}
+  setTimeout(() => { b.disabled = false; b.textContent = old; }, Math.max(0, 450 - (Date.now() - started)));
+});
+
+/* ---------------- admin ---------------- */
+function setupClientSwitch() {
+  const sel = $("admin-client-switch");
+  if (!state.data.user.is_admin) { sel.classList.add("hidden"); return; }
+  api("/api/admin/overview").then((ov) => {
+    state.admin = ov;
+    sel.innerHTML = "";
+    for (const c of ov.clients) {
+      const o = document.createElement("option");
+      o.value = c.id; o.textContent = "Client: " + c.name;
+      sel.appendChild(o);
+    }
+    sel.value = state.adminClientId || state.data.client.id;
+    sel.classList.toggle("hidden", ov.clients.length < 2);
+  }).catch(() => {});
+}
+
+$("admin-client-switch").addEventListener("change", async (e) => {
+  state.adminClientId = e.target.value;
+  state.campaign = ""; state.filter = "all";
+  closeThread();
+  await load(true);
+});
+
+$("admin-btn").addEventListener("click", async () => {
+  $("admin-overlay").classList.remove("hidden");
+  await refreshAdmin();
+});
+$("admin-close").addEventListener("click", () => $("admin-overlay").classList.add("hidden"));
+$("admin-overlay").addEventListener("click", (e) => { if (e.target.id === "admin-overlay") $("admin-overlay").classList.add("hidden"); });
+
+function adminMsg(text, isError) {
+  const m = $("admin-msg");
+  m.textContent = text; m.className = isError ? "error" : "ok";
+}
+
+async function refreshAdmin() {
+  try {
+    const ov = await api("/api/admin/overview");
+    state.admin = ov;
+    const cname = (id) => ov.clients.find(c => c.id === id)?.name ?? "?";
+
+    $("admin-clients").querySelector("tbody").innerHTML = ov.clients.map(c => `
+      <tr><td>${escapeHtml(c.name)}</td>
+      <td>${ov.campaigns.filter(x => x.client_id === c.id).length}</td>
+      <td>${ov.users.filter(u => u.client_id === c.id).length}</td></tr>`).join("");
+
+    $("admin-campaigns").querySelector("tbody").innerHTML = ov.campaigns.map(c => `
+      <tr><td>${escapeHtml(c.name)}</td><td>${escapeHtml(cname(c.client_id))}</td>
+      <td>${escapeHtml(c.status ?? "—")}</td>
+      <td>${c.synced_at ? timeAgo(c.synced_at) + " ago" : "never"}</td>
+      <td><button class="mini danger" data-unmap="${c.id}">Unmap</button></td></tr>`).join("");
+
+    const clientOpts = ov.clients.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("");
+    $("admin-available").querySelector("tbody").innerHTML = (ov.available_campaigns ?? []).filter(a => a.encrypted_id).map((a, i) => `
+      <tr><td>${escapeHtml(a.name)}</td>
+      <td><select data-mapsel="${i}">${clientOpts}</select></td>
+      <td><button class="mini go" data-map="${i}">Map</button></td></tr>`).join("") || `<tr><td colspan="3" style="color:var(--muted)">All Konnector campaigns are mapped.</td></tr>`;
+
+    $("admin-users").querySelector("tbody").innerHTML = ov.users.map(u => `
+      <tr><td>${escapeHtml(u.email)}${u.is_admin ? ' <span class="badge camp">admin</span>' : ""}</td>
+      <td>${escapeHtml(cname(u.client_id))}</td>
+      <td>${u.can_reply ? "yes" : "view only"}</td>
+      <td>${u.campaign_ids?.length ? u.campaign_ids.length + " campaign(s)" : "All campaigns"}</td>
+      <td>${u.is_admin ? "" : `<button class="mini danger" data-deluser="${escapeHtml(u.email)}">Remove</button>`}</td></tr>`).join("");
+
+    const userClientSel = $("new-user-client");
+    userClientSel.innerHTML = clientOpts;
+    renderAdminCampChecks();
+
+    $("admin-campaigns").querySelectorAll("[data-unmap]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("Unmap this campaign? Its synced conversations will be removed from the dashboard.")) return;
+      try { await api("/api/admin/campaigns/unmap", { method: "POST", body: JSON.stringify({ campaign_id: b.dataset.unmap }) }); adminMsg("Campaign unmapped."); await refreshAdmin(); await load(true); }
+      catch (e) { adminMsg("Unmap failed: " + e.message, true); }
+    }));
+    $("admin-available").querySelectorAll("[data-map]").forEach(b => b.addEventListener("click", async () => {
+      const i = Number(b.dataset.map);
+      const a = (state.admin.available_campaigns ?? []).filter(x => x.encrypted_id)[i];
+      const clientId = $("admin-available").querySelector(`[data-mapsel="${i}"]`).value;
+      b.disabled = true; b.textContent = "Mapping…";
+      try {
+        await api("/api/admin/campaigns/map", { method: "POST", body: JSON.stringify({ encrypted_id: a.encrypted_id, name: a.name, client_id: clientId }) });
+        adminMsg(`Mapped "${a.name}" — backfill running in the background (check Synced column in ~1 min).`);
+        await refreshAdmin();
+      } catch (e) { adminMsg("Map failed: " + e.message, true); b.disabled = false; b.textContent = "Map"; }
+    }));
+    $("admin-users").querySelectorAll("[data-deluser]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("Remove " + b.dataset.deluser + "?")) return;
+      try { await api("/api/admin/users/delete", { method: "POST", body: JSON.stringify({ email: b.dataset.deluser }) }); adminMsg("User removed."); await refreshAdmin(); }
+      catch (e) { adminMsg("Remove failed: " + e.message, true); }
+    }));
+  } catch (e) {
+    adminMsg("Could not load admin data: " + e.message, true);
+  }
+}
+
+function renderAdminCampChecks() {
+  const clientId = $("new-user-client").value;
+  const box = $("admin-camp-checks");
+  const camps = (state.admin?.campaigns ?? []).filter(c => c.client_id === clientId);
+  if (!camps.length) { box.innerHTML = '<em style="color:var(--muted)">This client has no campaigns yet — user will see all future ones.</em>'; return; }
+  box.innerHTML = '<em style="color:var(--muted)">Campaign access (none ticked = all campaigns):</em>' +
+    camps.map(c => `<label><input type="checkbox" value="${c.id}" class="camp-check"> ${escapeHtml(c.name)}</label>`).join("");
+}
+$("new-user-client").addEventListener("change", renderAdminCampChecks);
+
+$("add-client-btn").addEventListener("click", async () => {
+  const name = $("new-client-name").value.trim();
+  if (!name) return adminMsg("Enter a client name.", true);
+  try { await api("/api/admin/clients", { method: "POST", body: JSON.stringify({ name }) }); $("new-client-name").value = ""; adminMsg("Client added."); await refreshAdmin(); setupClientSwitch(); }
+  catch (e) { adminMsg("Add failed: " + e.message, true); }
+});
+
+$("add-user-btn").addEventListener("click", async () => {
+  const email = $("new-user-email").value.trim().toLowerCase();
+  const clientId = $("new-user-client").value;
+  if (!email || !email.includes("@")) return adminMsg("Enter a valid email.", true);
+  const campaignIds = [...document.querySelectorAll(".camp-check:checked")].map(c => c.value);
+  try {
+    await api("/api/admin/users", { method: "POST", body: JSON.stringify({ email, client_id: clientId, can_reply: $("new-user-reply").checked, campaign_ids: campaignIds }) });
+    $("new-user-email").value = "";
+    adminMsg("User saved. They can now log in with " + email + ".");
+    await refreshAdmin();
+  } catch (e) { adminMsg("Save failed: " + e.message, true); }
+});
+
+/* ---------------- boot ---------------- */
+(async () => {
+  const { data } = await sb.auth.getSession();
+  if (data?.session) startApp();
+  else showLogin();
+})();
+</script>
+</body>
+</html>
