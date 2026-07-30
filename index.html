@@ -251,6 +251,10 @@
   #admin-msg.error{color:var(--red)}
   #admin-msg.ok{color:var(--green)}
   .admin-close{float:right;border:0;background:transparent;font-size:1.3rem;line-height:1;color:var(--muted)}
+  #token-result{margin-top:10px;padding:12px 14px;border:1px solid #cfe3d5;background:#f1f8f3;border-radius:10px}
+  #token-result .tk{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;word-break:break-all;background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:6px 0}
+  #token-result .warn{font-size:.78rem;color:var(--amber)}
+  .tok-revoked{opacity:.5;text-decoration:line-through}
 
   @media (max-width: 860px){
     main{padding:10px;gap:0}
@@ -417,6 +421,21 @@
     </div>
     <div id="admin-camp-checks"><em style="color:var(--muted)">Pick a client to choose campaign access (none ticked = all campaigns)</em></div>
     <div class="form-inline"><button class="mini go" id="add-user-btn">Add / update user</button></div>
+
+    <h3>Client AI access (MCP tokens)</h3>
+    <div style="color:var(--muted);font-size:.82rem;margin-bottom:6px">
+      Lets a client connect their own AI tool to <em>their</em> data — read-only unless you tick reply.
+      The token is shown once, only here. Revoke any time.
+    </div>
+    <table id="admin-tokens"><thead><tr><th>Label</th><th>Client</th><th>Token</th><th>Reply</th><th>Access</th><th>Last used</th><th></th></tr></thead><tbody></tbody></table>
+    <div class="form-inline">
+      <input type="text" id="new-token-label" placeholder="e.g. Kinner's assistant">
+      <select id="new-token-client"></select>
+      <label style="font-size:.83rem"><input type="checkbox" id="new-token-reply"> can reply</label>
+      <input type="text" id="new-token-days" placeholder="expires in days (blank = never)" style="width:200px">
+      <button class="mini go" id="add-token-btn">Create token</button>
+    </div>
+    <div id="token-result" class="hidden"></div>
 
     <div id="admin-msg"></div>
   </div>
@@ -1562,6 +1581,8 @@ async function refreshAdmin() {
       <td>${u.is_admin ? "" : `<button class="mini danger" data-deluser="${esc(u.email)}">Remove</button>`}</td></tr>`).join("");
     $("new-user-client").innerHTML = clientOpts;
     $("logo-client").innerHTML = clientOpts;
+    $("new-token-client").innerHTML = clientOpts;
+    renderAdminTokens(ov, cname);
     renderAdminCampChecks();
 
     $("admin-campaigns").querySelectorAll("[data-unmap]").forEach(b => b.addEventListener("click", async () => {
@@ -1594,6 +1615,63 @@ function existingUser() {
   if (!email) return null;
   return (state.admin?.users ?? []).find(u => u.email === email) ?? null;
 }
+function renderAdminTokens(ov, cname) {
+  const rows = ov.tokens ?? [];
+  const body = $("admin-tokens").querySelector("tbody");
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="7" style="color:var(--muted)">No client AI tokens yet.</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(t => {
+    const expired = t.expires_at && new Date(t.expires_at) < new Date();
+    const dead = t.revoked_at || expired;
+    return `<tr class="${dead ? "tok-revoked" : ""}">
+      <td>${esc(t.label)}</td>
+      <td>${esc(cname(t.client_id))}</td>
+      <td style="font-family:ui-monospace,Menlo,monospace">${esc(t.prefix)}…</td>
+      <td>${t.can_reply ? "yes" : "read only"}</td>
+      <td>${t.campaign_ids?.length ? t.campaign_ids.length + " campaign(s)" : "All campaigns"}</td>
+      <td>${t.revoked_at ? "revoked" : expired ? "expired" : t.last_used_at ? timeAgo(t.last_used_at) + " ago" : "never"}</td>
+      <td>${dead ? "" : `<button class="mini danger" data-revoke="${t.id}">Revoke</button>`}</td>
+    </tr>`;
+  }).join("");
+  body.querySelectorAll("[data-revoke]").forEach(b => b.addEventListener("click", async () => {
+    if (!confirm("Revoke this token? Any AI tool using it stops working immediately.")) return;
+    try { await api("/api/admin/tokens/revoke", { method: "POST", body: JSON.stringify({ token_id: b.dataset.revoke }) }); adminMsg("Token revoked."); await refreshAdmin(); }
+    catch (e) { adminMsg("Revoke failed: " + e.message, true); }
+  }));
+}
+
+$("add-token-btn").addEventListener("click", async () => {
+  const label = $("new-token-label").value.trim();
+  const client_id = $("new-token-client").value;
+  const can_reply = $("new-token-reply").checked;
+  const daysRaw = $("new-token-days").value.trim();
+  if (!label) return adminMsg("Give the token a label so you know who it belongs to.", true);
+  if (can_reply && !confirm("This token will be able to SEND real LinkedIn messages on the client's behalf. Continue?")) return;
+  try {
+    const r = await api("/api/admin/tokens", {
+      method: "POST",
+      body: JSON.stringify({ label, client_id, can_reply, expires_days: daysRaw ? Number(daysRaw) : null }),
+    });
+    $("new-token-label").value = ""; $("new-token-days").value = ""; $("new-token-reply").checked = false;
+    const box = $("token-result");
+    box.classList.remove("hidden");
+    box.innerHTML = "";
+    const h = document.createElement("div");
+    h.innerHTML = `<strong>Token created — copy it now.</strong> <span class="warn">It cannot be shown again.</span>`;
+    const tk = document.createElement("div"); tk.className = "tk"; tk.textContent = r.token;
+    const how = document.createElement("div");
+    how.style.fontSize = ".8rem"; how.style.color = "var(--text-secondary)";
+    how.innerHTML = `Give the client these two values for their AI tool:<br>
+      <strong>MCP server URL:</strong> <span style="font-family:ui-monospace,Menlo,monospace">${esc(r.mcp_url)}</span><br>
+      <strong>Authorization header:</strong> <span style="font-family:ui-monospace,Menlo,monospace">Bearer &lt;the token above&gt;</span>`;
+    box.append(h, tk, how);
+    adminMsg("Token created.");
+    await refreshAdmin();
+  } catch (e) { adminMsg("Could not create token: " + (e.body?.error ?? e.message), true); }
+});
+
 function renderAdminCampChecks() {
   const clientId = $("new-user-client").value;
   const box = $("admin-camp-checks");
