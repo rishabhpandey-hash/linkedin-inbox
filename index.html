@@ -519,7 +519,16 @@ window.INBOX = {
   async getAnalytics(days) { if (days) state.days = String(days); await loadAnalytics(); return state.analytics; },
 };
 
-async function token() { const { data } = await sb.auth.getSession(); return data?.session?.access_token ?? null; }
+// The session can still be restoring from storage on the first paint, so give it one
+// more chance before deciding the user is signed out.
+async function token() {
+  let { data } = await sb.auth.getSession();
+  if (!data?.session?.access_token) {
+    await new Promise((r) => setTimeout(r, 350));
+    ({ data } = await sb.auth.getSession());
+  }
+  return data?.session?.access_token ?? null;
+}
 
 async function api(path, opts = {}) {
   const t = await token();
@@ -619,7 +628,13 @@ async function startApp() {
   clearRenderedData();                       // never show the previous account's rows
   const m = $("login-msg"); m.textContent = "Signing you in…"; m.className = "login-msg";
   try {
-    await load();                            // load first, reveal after — no stale frame
+    try {
+      await load();                          // load first, reveal after — no stale frame
+    } catch (first) {
+      if (first.status === 403) throw first;  // genuinely not whitelisted: do not retry
+      await new Promise((r) => setTimeout(r, 600));
+      await load();                           // one retry absorbs a session still warming up
+    }
     $("login-view").classList.add("hidden");
     $("app-view").classList.remove("hidden");
     m.textContent = "";
