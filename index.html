@@ -492,8 +492,10 @@ async function startApp() {
 }
 
 async function load(silent) {
-  const qs = state.campaign ? "?campaign_id=" + encodeURIComponent(state.campaign) : "";
-  state.data = await api("/api/inbox" + qs);
+  const qs = new URLSearchParams({ filter: state.filter });
+  if (state.campaign) qs.set("campaign_id", state.campaign);
+  if (state.search.trim()) qs.set("q", state.search.trim());
+  state.data = await api("/api/inbox?" + qs.toString());
   renderHeader(); renderStats(); renderChips(); renderList(); mirror();
   if (!silent && state.data.user?.is_admin) { $("admin-btn").classList.remove("hidden"); setupClientSwitch(); }
 }
@@ -543,12 +545,12 @@ function renderStats() {
   const wrap = $("stats"); wrap.innerHTML = "";
   const camps = state.campaign ? state.data.campaigns.filter(c => c.id === state.campaign) : state.data.campaigns;
   const sum = (k) => { let any = false, t = 0; for (const c of camps) { const v = c.stats?.[k]; if (v !== null && v !== undefined) { any = true; t += Number(v); } } return any ? t : null; };
-  const convs = state.data.conversations.filter(cv => !state.campaign || cv.campaign_id === state.campaign);
+  const counts = state.data.counts ?? { all: state.data.conversations.length, needs_reply: 0 };
   const tiles = [
     ["Leads in campaign", sum("member_count")],
     ["Messages sent", sum("message_sent_count")],
-    ["Conversations", convs.length],
-    ["Awaiting your reply", convs.filter(c => c.last_direction === "REPLY").length],
+    ["Conversations", counts.all],
+    ["Awaiting your reply", counts.needs_reply],
   ];
   for (const [label, val] of tiles) {
     if (val === null) continue;
@@ -558,33 +560,27 @@ function renderStats() {
     wrap.appendChild(d);
   }
 }
-function filteredConvs() {
-  const q = state.search.toLowerCase();
-  return state.data.conversations.filter(cv => {
-    if (state.campaign && cv.campaign_id !== state.campaign) return false;
-    if (state.filter === "needs_reply" && cv.last_direction !== "REPLY") return false;
-    if (state.filter === "handled" && cv.last_direction !== "SENT") return false;
-    if (q) {
-      const hay = [cv.profile?.name, cv.profile?.company_name, cv.profile?.occupation, cv.last_message_preview, cv.sender_name].join(" ").toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    return true;
-  });
-}
+// the server already applied campaign / filter / search, so the loaded page is the list
+const filteredConvs = () => state.data.conversations;
+
 function renderChips() {
-  const inScope = state.data.conversations.filter(cv => !state.campaign || cv.campaign_id === state.campaign);
+  const counts = state.data.counts ?? { all: 0, needs_reply: 0, handled: 0 };
   const chips = [
-    ["all", "All", inScope.length],
-    ["needs_reply", "Needs reply", inScope.filter(c => c.last_direction === "REPLY").length],
-    ["handled", "Replied", inScope.filter(c => c.last_direction === "SENT").length],
+    ["all", "All", counts.all],
+    ["needs_reply", "Needs reply", counts.needs_reply],
+    ["handled", "Replied", counts.handled],
   ];
   const wrap = $("chips"); wrap.innerHTML = "";
   for (const [key, label, count] of chips) {
     const b = document.createElement("button");
     b.className = "chip" + (state.filter === key ? " active" : "");
     b.dataset.filter = key;
-    b.innerHTML = `${label} <span class="c">${count}</span>`;
-    b.addEventListener("click", () => { state.filter = key; renderChips(); renderList(); mirror(); });
+    b.innerHTML = `${label} <span class="c">${nf(count)}</span>`;
+    b.addEventListener("click", async () => {
+      if (state.filter === key) return;
+      state.filter = key; renderChips();
+      try { await load(true); } catch (e) { console.error(e); }
+    });
     wrap.appendChild(b);
   }
 }
@@ -592,7 +588,17 @@ const campName = (id) => state.data.campaigns.find(c => c.id === id)?.name ?? ""
 function renderList() {
   const wrap = $("conv-list"); wrap.innerHTML = "";
   const rows = filteredConvs();
-  if (!rows.length) { wrap.innerHTML = `<div id="list-empty">No conversations here yet.</div>`; return; }
+  if (!rows.length) {
+    wrap.innerHTML = `<div id="list-empty">${state.search.trim() ? "Nothing matches that search." : "No conversations here yet."}</div>`;
+    return;
+  }
+  const total = state.data.total_matching ?? rows.length;
+  if (total > rows.length) {
+    const note = document.createElement("div");
+    note.style.cssText = "padding:8px 13px;font-size:.75rem;color:var(--muted);background:#fbfcfd;border-bottom:1px solid var(--line)";
+    note.textContent = `Showing the ${nf(rows.length)} most recent of ${nf(total)} — use the filters or search to narrow down.`;
+    wrap.appendChild(note);
+  }
   for (const cv of rows) {
     const div = document.createElement("div");
     div.className = "row" + (state.thread?.conversation?.id === cv.id ? " sel" : "");
@@ -677,7 +683,12 @@ $("send-btn").addEventListener("click", async () => {
 });
 
 /* ================= controls ================= */
-$("search").addEventListener("input", (e) => { state.search = e.target.value; renderList(); mirror(); });
+let searchTimer = null;
+$("search").addEventListener("input", (e) => {
+  state.search = e.target.value;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(async () => { try { await load(true); } catch (err) { console.error(err); } }, 350);
+});
 $("campaign-select").addEventListener("change", async (e) => {
   state.campaign = e.target.value; closeThread();
   await load(true);
@@ -734,7 +745,11 @@ function renderAnalytics() {
       <span class="tx"><strong>${nf(live.awaiting)} conversation${live.awaiting === 1 ? "" : "s"} waiting on a reply</strong>${crit ? ` — ${nf(live.awaiting_48h)} have been waiting more than 48 hours.` : "."}</span>`;
     const btn = document.createElement("button");
     btn.textContent = "Open in inbox";
-    btn.addEventListener("click", () => { state.filter = "needs_reply"; setTab("inbox"); renderChips(); renderList(); });
+    btn.addEventListener("click", async () => {
+      state.filter = "needs_reply"; state.search = ""; $("search").value = "";
+      setTab("inbox");
+      try { await load(true); } catch (e) { console.error(e); }
+    });
     attn.appendChild(btn);
     body.appendChild(attn);
   }
