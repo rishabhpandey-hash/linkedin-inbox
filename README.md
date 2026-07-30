@@ -60,6 +60,29 @@ It returns every endpoint, its parameters, and notes on what the fields mean.
 
 Auth is a Supabase JWT in `Authorization: Bearer …`; the account's email must be in `client_users`.
 
+### MCP server (for a client's own AI tooling)
+
+A remote MCP server exposes the same client-scoped data to a client's AI tool, without
+handing over any vendor API key:
+
+```
+URL:    https://qypevxpscdhdrzlelolt.supabase.co/functions/v1/mcp
+Header: Authorization: Bearer <per-client token>
+```
+
+Mint and revoke tokens in the dashboard's Admin panel → **Client AI access (MCP tokens)**.
+The token is displayed once; only its SHA-256 hash is stored. Tokens are scoped to one
+client (optionally a subset of campaigns), are **read-only unless reply is ticked**, can
+carry an expiry, and are revocable instantly. Every call is rate limited (60/min) and
+logged with its arguments and duration.
+
+Tools: `linkedin_get_account_info`, `linkedin_get_analytics`, `linkedin_list_conversations`,
+`linkedin_get_conversation`, and — only for tokens with reply enabled —
+`linkedin_reply_to_conversation` (which sends a real LinkedIn message).
+
+Campaign arguments accept a name as well as an id, and list results are paginated with
+`limit`/`offset` so an agent never has to pull thousands of rows into its context.
+
 ### Driving the page in a browser
 
 The page exposes a stable action surface — no DOM scraping needed:
