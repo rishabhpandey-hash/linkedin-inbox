@@ -118,6 +118,13 @@
   #list-controls select{flex:1;min-width:0;padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:.8rem;color:var(--muted)}
   #list-controls .tbtn{flex:none}
   .badge.wait{background:#fdeeee;color:var(--red)}
+  .badge.assigned{background:#eaf7ee;color:var(--green)}
+  #assign-row{display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--line);background:#fbfcfd}
+  #assign-row .lbl{font-size:.78rem;color:var(--muted);font-weight:600}
+  #assign-select{padding:5px 9px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:.82rem;max-width:240px}
+  #assign-msg{font-size:.75rem;color:var(--muted)}
+  #assign-msg.ok{color:var(--green)}
+  #assign-msg.error{color:var(--red)}
   #conv-list{flex:1;overflow-y:auto;min-height:0}
   .row{display:flex;gap:10px;padding:11px 13px;border-bottom:1px solid var(--line);cursor:pointer}
   .row:hover{background:#f8fafc}
@@ -332,6 +339,7 @@
           <input id="search" type="search" placeholder="Search name, company, message…" autocomplete="off" aria-label="Search conversations">
           <div id="list-controls">
             <select id="sender-select" aria-label="Filter by LinkedIn profile" data-role="sender-filter"><option value="">All profiles</option></select>
+            <select id="assignee-select" class="hidden" aria-label="Filter by assignee" data-role="assignee-filter"><option value="">Anyone</option></select>
             <select id="sort-select" aria-label="Sort conversations" data-role="sort">
               <option value="recent">Newest first</option>
               <option value="oldest_waiting">Longest waiting</option>
@@ -352,6 +360,11 @@
               <div class="th-name" id="th-name"></div>
               <div class="th-sub" id="th-sub"></div>
             </div>
+          </div>
+          <div id="assign-row" class="hidden">
+            <span class="lbl">Assigned to</span>
+            <select id="assign-select" data-role="assign"></select>
+            <span id="assign-msg"></span>
           </div>
           <div id="msgs" data-role="messages"></div>
           <div id="composer" class="hidden">
@@ -456,6 +469,7 @@ const state = {
   data: null, filter: "all", search: "", campaign: "", sender: "", sort: "recent", thread: null,
   adminClientId: "", appStarted: false, refreshTimer: null, admin: null,
   tab: "inbox", days: "30", anSender: "", analytics: null, anLoading: false,
+  assignee: "",              // admin: show only this person's queue
 };
 
 // filter key -> label + one-line meaning (also surfaced to agents via INBOX.describe())
@@ -466,6 +480,9 @@ const FILTER_DEFS = [
   ["engaged", "In conversation", "A real back-and-forth is going"],
   ["answered", "We replied", "Your team spoke last"],
   ["first_reply", "Replied once", "The lead replied but the exchange never continued"],
+  ["mine", "Assigned to me", "Routed to you by an admin"],
+  ["unassigned", "Unassigned", "Nobody is looking after this lead yet"],
+  ["assigned", "Assigned", "Routed to someone on the team"],
 ];
 const SORT_DEFS = [
   ["recent", "Newest first"],
@@ -491,7 +508,7 @@ function mirror() {
       user: d?.user ?? null,
       applied: {
         campaign_id: state.campaign, campaign_name: d ? campName(state.campaign) : "",
-        filter: state.filter, sort: state.sort, sender: state.sender, search: state.search,
+        filter: state.filter, sort: state.sort, sender: state.sender, assignee: state.assignee, search: state.search,
         analytics_period_days: state.days, analytics_sender: state.anSender,
       },
       counts: d?.counts ?? null,
@@ -501,7 +518,7 @@ function mirror() {
       senders: d?.senders ?? [],
       conversations: (d?.conversations ?? []).slice(0, 60).map(c => ({
         id: c.id, name: c.profile?.name, company: c.profile?.company_name,
-        status: c.conversation_status, last_direction: c.last_direction,
+        status: c.conversation_status, last_direction: c.last_direction, assigned_to: c.assigned_to,
         waiting_hours: c.waiting_hours, sender: c.sender_name,
         last_message_at: c.last_message_at, preview: c.last_message_preview,
       })),
@@ -526,6 +543,8 @@ window.INBOX = {
         "setFilter(key)": FILTER_DEFS.map(([k, l, h]) => ({ key: k, label: l, meaning: h })),
         "setSort(key)": SORT_DEFS.map(([k, l]) => ({ key: k, label: l })),
         "setSender(name|'')": "restrict to one LinkedIn sending profile",
+        "setAssignee(email|'')": "admin: show only that person's routed leads",
+        "assign(id, email|null)": "admin: route a lead to a teammate (null clears it)",
         "setCampaign(id|'')": "scope both tabs to one campaign",
         "search(text)": "server-side search over name, company, headline, message text and sender",
         "setTab('inbox'|'analytics')": "switch view",
@@ -543,6 +562,14 @@ window.INBOX = {
   async setFilter(key) { if (!FILTER_DEFS.some(f => f[0] === key)) throw new Error("unknown filter"); state.filter = key; await load(true); renderChips(); return this.getState(); },
   async setSort(key) { if (!SORT_DEFS.some(s => s[0] === key)) throw new Error("unknown sort"); state.sort = key; await load(true); return this.getState(); },
   async setSender(name) { state.sender = name ?? ""; await load(true); return this.getState(); },
+  async setAssignee(email) { state.assignee = email ?? ""; await load(true); return this.getState(); },
+  async assign(conversationId, email) {
+    if (!state.data?.user?.is_admin) throw new Error("assigning leads is admin-only");
+    const r = await api("/api/assign", { method: "POST", body: JSON.stringify({ conversation_id: conversationId, assignee_email: email ?? null }) });
+    await load(true);
+    if (state.thread?.conversation?.id === conversationId) await openThread(conversationId);
+    return r;
+  },
   async setCampaign(id) { state.campaign = id ?? ""; $("campaign-select").value = state.campaign; closeThread(); state.analytics = null; await load(true); if (state.tab === "analytics") await loadAnalytics(true); return this.getState(); },
   async search(text) { state.search = text ?? ""; $("search").value = state.search; await load(true); return this.getState(); },
   async setTab(tab) {
@@ -668,7 +695,7 @@ $("login-btn").addEventListener("click", async () => {
 });
 $("logout-btn").addEventListener("click", async () => {
   await sb.auth.signOut();
-  Object.assign(state, { data: null, filter: "all", search: "", campaign: "", sender: "", sort: "recent", thread: null, adminClientId: "", admin: null, tab: "inbox", days: "30", anSender: "", analytics: null });
+  Object.assign(state, { data: null, filter: "all", search: "", campaign: "", sender: "", assignee: "", sort: "recent", thread: null, adminClientId: "", admin: null, tab: "inbox", days: "30", anSender: "", analytics: null });
   for (const x of document.querySelectorAll("#range-row .chip")) x.classList.toggle("active", x.dataset.days === "30");
   $("search").value = ""; $("admin-btn").classList.add("hidden");
   $("admin-client-switch").classList.add("hidden"); $("admin-overlay").classList.add("hidden");
@@ -707,6 +734,7 @@ function inboxQuery() {
   if (state.campaign) qs.set("campaign_id", state.campaign);
   if (state.search.trim()) qs.set("q", state.search.trim());
   if (state.sender) qs.set("sender", state.sender);
+  if (state.assignee) qs.set("assignee", state.assignee);
   return qs;
 }
 
@@ -815,8 +843,29 @@ function renderControls() {
   state.sender = sel.value;
   sel.classList.toggle("hidden", senders.length < 2);   // only the profile picker, not the whole row
   $("sort-select").value = state.sort;
+
+  // admins can narrow to one person's queue
+  const asel = $("assignee-select");
+  const team = state.data?.team ?? [];
+  const counts = Object.fromEntries((state.data?.assignees ?? []).map(a => [a.email, a.n]));
+  if (state.data?.user?.is_admin && team.length) {
+    asel.classList.remove("hidden");
+    asel.innerHTML = '<option value="">Anyone</option>' +
+      team.map(t => `<option value="${esc(t.email)}">${esc(t.label || t.email)}${counts[t.email] ? " · " + counts[t.email] : ""}</option>`).join("");
+    asel.value = team.some(t => t.email === state.assignee) ? state.assignee : "";
+    state.assignee = asel.value;
+  } else {
+    asel.classList.add("hidden");
+    state.assignee = "";
+  }
 }
 const campName = (id) => state.data.campaigns.find(c => c.id === id)?.name ?? "";
+// team members are stored by email; show the friendly label where we have one
+function teamName(email) {
+  if (!email) return "";
+  const m = (state.data?.team ?? []).find(t => t.email === email);
+  return m?.label || email.split("@")[0];
+}
 function renderList() {
   const wrap = $("conv-list"); wrap.innerHTML = "";
   const rows = filteredConvs();
@@ -841,6 +890,7 @@ function renderList() {
     div.dataset.status = cv.conversation_status ?? "";
     div.dataset.sender = cv.sender_name ?? "";
     if (cv.waiting_hours != null) div.dataset.waitingHours = cv.waiting_hours;
+    if (cv.assigned_to) div.dataset.assignedTo = cv.assigned_to;
     const img = cv.profile?.image ? `<img src="${esc(cv.profile.image)}" alt="" onerror="this.remove()">` : "";
     const wh = cv.waiting_hours;
     const await_ = cv.last_direction !== "REPLY" ? ""
@@ -848,6 +898,8 @@ function renderList() {
         ? `<span class="badge wait">Waiting ${Math.round(wh / 24)} days</span>`
         : `<span class="badge await">Awaiting your reply</span>`;
     const campBadge = !state.campaign && state.data.campaigns.length > 1 ? `<span class="badge camp">${esc(shorten(campName(cv.campaign_id), 30))}</span>` : "";
+    const assignBadge = cv.assigned_to
+      ? `<span class="badge assigned" title="Routed to ${esc(cv.assigned_to)}">→ ${esc(teamName(cv.assigned_to))}</span>` : "";
     div.innerHTML = `
       <span class="avatar">${img}${img ? "" : initials(cv.profile?.name)}</span>
       <div class="row-main">
@@ -857,7 +909,7 @@ function renderList() {
         </div>
         <div class="row-occ">${esc(cv.profile?.occupation ?? "")}</div>
         <div class="row-preview ${cv.last_direction === "REPLY" ? "unreplied" : ""}">${cv.last_direction === "SENT" ? "You: " : ""}${esc(cv.last_message_preview ?? "")}</div>
-        <div class="badges">${await_}${campBadge}<span class="badge via">via ${esc(cv.sender_name ?? "?")}</span></div>
+        <div class="badges">${await_}${assignBadge}${campBadge}<span class="badge via">via ${esc(cv.sender_name ?? "?")}</span></div>
       </div>`;
     div.addEventListener("click", () => openThread(cv.id));
     wrap.appendChild(div);
@@ -881,6 +933,44 @@ async function openThread(id) {
     mirror();
   } catch (e) { alert("Could not open the conversation: " + e.message); }
 }
+// Admins route a lead to a teammate; everyone else just sees who owns it.
+function renderAssignRow(cv) {
+  const row = $("assign-row"), sel = $("assign-select"), msg = $("assign-msg");
+  const team = (state.data?.team ?? []).filter(t => !t.is_admin || t.email === cv.assigned_to);
+  msg.textContent = ""; msg.className = "";
+  if (!state.data.user.is_admin) {
+    // non-admins see the routing but cannot change it
+    row.classList.toggle("hidden", !cv.assigned_to);
+    if (cv.assigned_to) {
+      sel.classList.add("hidden");
+      msg.textContent = cv.assigned_to === state.data.user.email
+        ? "You are handling this lead." : teamName(cv.assigned_to) + " is handling this lead.";
+    }
+    return;
+  }
+  row.classList.remove("hidden");
+  sel.classList.remove("hidden");
+  sel.innerHTML = '<option value="">Nobody yet</option>' +
+    team.map(t => `<option value="${esc(t.email)}">${esc(t.label || t.email)}</option>`).join("");
+  sel.value = cv.assigned_to ?? "";
+  if (cv.assigned_at) msg.textContent = "routed " + timeAgo(cv.assigned_at) + " ago";
+  sel.onchange = async () => {
+    const to = sel.value || null;
+    sel.disabled = true; msg.textContent = "Saving…"; msg.className = "";
+    try {
+      const r = await api("/api/assign", { method: "POST", body: JSON.stringify({ conversation_id: cv.id, assignee_email: to }) });
+      cv.assigned_to = r.assigned_to; cv.assigned_at = r.assigned_at;
+      msg.textContent = to ? "Routed to " + teamName(to) : "Assignment cleared";
+      msg.className = "ok";
+      await load(true);                       // refresh counts + the row badge
+    } catch (e) {
+      msg.textContent = "Could not save: " + (e.body?.error ?? e.message);
+      msg.className = "error";
+      sel.value = cv.assigned_to ?? "";
+    } finally { sel.disabled = false; }
+  };
+}
+
 function renderThread() {
   const { conversation: cv, campaign, messages } = state.thread;
   $("thread-placeholder").classList.add("hidden");
@@ -904,6 +994,7 @@ function renderThread() {
     box.appendChild(d);
   }
   box.scrollTop = box.scrollHeight;
+  renderAssignRow(cv);
   const composer = $("composer");
   if (state.data.user.can_reply) {
     composer.classList.remove("hidden");
@@ -936,6 +1027,10 @@ $("sender-select").addEventListener("change", async (e) => {
   state.sender = e.target.value;
   try { await load(true); } catch (err) { console.error(err); }
 });
+$("assignee-select").addEventListener("change", async (e) => {
+  state.assignee = e.target.value;
+  try { await load(true); } catch (err) { console.error(err); }
+});
 $("sort-select").addEventListener("change", async (e) => {
   state.sort = e.target.value;
   try { await load(true); } catch (err) { console.error(err); }
@@ -949,7 +1044,8 @@ $("export-btn").addEventListener("click", async () => {
     u.searchParams.set("filter", state.filter);
     u.searchParams.set("sort", state.sort);                      // export what is on screen,
     if (state.search.trim()) u.searchParams.set("q", state.search.trim());  // search and
-    if (state.sender) u.searchParams.set("sender", state.sender);            // sender included
+    if (state.sender) u.searchParams.set("sender", state.sender);
+    if (state.assignee) u.searchParams.set("assignee", state.assignee);            // sender included
     if (state.campaign) u.searchParams.set("campaign_id", state.campaign);
     if (state.adminClientId) u.searchParams.set("client_id", state.adminClientId);
     const res = await fetch(u, { headers: { Authorization: "Bearer " + t } });
@@ -966,7 +1062,7 @@ $("export-btn").addEventListener("click", async () => {
 $("campaign-select").addEventListener("change", async (e) => {
   // reset the narrowing filters: they belong to the campaign you were just looking at
   state.campaign = e.target.value;
-  state.filter = "all"; state.sender = ""; state.search = ""; $("search").value = "";
+  state.filter = "all"; state.sender = ""; state.assignee = ""; state.search = ""; $("search").value = "";
   state.anSender = "";                       // sender options differ per campaign
   closeThread();
   await load(true);
@@ -992,7 +1088,7 @@ $("an-campaign").addEventListener("change", async (e) => {
   state.campaign = e.target.value;
   $("campaign-select").value = state.campaign;
   state.anSender = "";
-  state.filter = "all"; state.sender = ""; state.search = ""; $("search").value = "";
+  state.filter = "all"; state.sender = ""; state.assignee = ""; state.search = ""; $("search").value = "";
   closeThread();
   try { await load(true); } catch (err) { console.error(err); }
   await loadAnalytics(true);
@@ -1542,7 +1638,7 @@ function setupClientSwitch() {
 }
 $("admin-client-switch").addEventListener("change", async (e) => {
   state.adminClientId = e.target.value;
-  state.campaign = ""; state.filter = "all"; state.sender = ""; state.anSender = ""; state.search = ""; $("search").value = ""; state.analytics = null;
+  state.campaign = ""; state.filter = "all"; state.sender = ""; state.assignee = ""; state.anSender = ""; state.search = ""; $("search").value = ""; state.analytics = null;
   closeThread(); await load(true);
   if (state.tab === "analytics") loadAnalytics(true);
 });
