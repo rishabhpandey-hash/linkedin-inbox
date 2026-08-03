@@ -208,6 +208,8 @@
   .an-table td{padding:7px 8px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
   .an-table td.name{font-variant-numeric:normal}
   .an-table tr:last-child td{border-bottom:0}
+  .an-table td.muted-cell{color:var(--text-secondary)}
+  .table-scroll{overflow-x:auto}          /* wide tables scroll themselves, never the page */
   .barcell{position:relative;min-width:90px}
   .barcell .bar{height:8px;border-radius:0 4px 4px 0;background:var(--series-1)}
   .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.78rem;color:var(--text-secondary);margin-top:8px}
@@ -536,7 +538,16 @@ function mirror() {
         name: state.thread.conversation.profile?.name,
         messages: state.thread.messages.length,
       } : null,
-      analytics: a ? { period: a.range?.label, live: a.db?.live ?? null, range: a.db?.range ?? null, funnel: a.funnel ?? null } : null,
+      analytics: a ? {
+        period: a.range?.label, live: a.db?.live ?? null, range: a.db?.range ?? null, funnel: a.funnel ?? null,
+        // what each profile SENT in the period, next to what our data holds for it.
+        // Only replied leads become conversations, so sent is normally much larger.
+        by_sending_profile: (a.db?.senders ?? []).map(s => ({
+          name: s.name,
+          conversations: s.conversations, awaiting: s.awaiting,
+          ...(((state.senderVols ?? {})[senderVolKey()] ?? {})[s.name] ?? {}),
+        })),
+      } : null,
       api_base: API,
       agent_api: "window.INBOX — call INBOX.describe() for the action list",
     });
@@ -1155,6 +1166,7 @@ function loadAnalytics(force) {
       if (state.anSender) qs.set("sender", state.anSender);
       state.analytics = await api("/api/analytics?" + qs.toString());
       renderAnalytics();
+      loadSenderVolumes();   // fills in the send volumes once the page is already usable
       return state.analytics;
     } catch (e) {
       body.innerHTML = `<div class="card col-12"><div class="empty-note">Could not load analytics: ${esc(e.body?.detail ?? e.message)}</div></div>`;
@@ -1165,6 +1177,59 @@ function loadAnalytics(force) {
     }
   })();
   return analyticsInFlight;
+}
+
+/* ---- per-profile send volumes ----
+   The inbox only holds leads who REPLIED, so a profile can send hundreds of messages and
+   show few conversations. These numbers give each profile its denominator.
+   /api/analytics already scopes its volumes when sender= is passed, so we ask once per
+   profile; the server caches each answer for 10 minutes. Fired after the first paint so
+   it never delays the page, and skipped when a single profile is already selected. */
+let senderVolInFlight = false;
+function senderVolKey() {
+  return `${state.days}|${state.campaign || "all"}`;
+}
+function loadSenderVolumes() {
+  const a = state.analytics;
+  if (!a || state.anSender) return;                       // a single profile already shows its own volumes
+  const names = (a.db?.senders ?? []).map(s => s.name).filter(Boolean);
+  if (names.length < 1) return;
+  const key = senderVolKey();
+  state.senderVols = state.senderVols ?? {};
+  if (state.senderVols[key] || senderVolInFlight) { paintSenderVolumes(); return; }
+  senderVolInFlight = true;
+  const bucket = {};
+  Promise.all(names.map(async (name) => {
+    try {
+      const qs = new URLSearchParams({ days: state.days, sender: name });
+      if (state.campaign) qs.set("campaign_id", state.campaign);
+      const r = await api("/api/analytics?" + qs.toString());
+      const f = r?.funnel ?? {};
+      // only trust it when the server confirms the volumes really are scoped to this profile
+      if (r?.sender_scoped_volumes && !f.error) {
+        bucket[name] = { messages_sent: f.messages_sent, replies: f.message_replies, reply_pct: f.message_reply_pct };
+      }
+    } catch { /* leave this profile blank rather than showing a wrong number */ }
+  })).then(() => {
+    state.senderVols[key] = bucket;
+    senderVolInFlight = false;
+    // the period or campaign may have changed while we were fetching — paint only what
+    // matches, then go and fetch the scope the user is actually looking at now
+    if (senderVolKey() === key) { if (state.tab === "analytics") paintSenderVolumes(); }
+    else loadSenderVolumes();
+  });
+}
+
+function paintSenderVolumes() {
+  const vols = (state.senderVols ?? {})[senderVolKey()];
+  if (!vols) return;
+  for (const cell of document.querySelectorAll("[data-sendervol]")) {
+    const v = vols[cell.dataset.sendervol];
+    const field = cell.dataset.volfield;
+    if (!v || v[field] === null || v[field] === undefined) { cell.textContent = "—"; continue; }
+    cell.textContent = field === "reply_pct" ? pct(v[field]) : nf(v[field]);
+  }
+  mirror();   // keep the agent snapshot in step with the table
 }
 
 function renderAnalyticsFilters() {
@@ -1348,8 +1413,8 @@ function renderAnalytics() {
   /* --- senders --- */
   const sendCard = document.createElement("div");
   sendCard.className = "card col-7";
-  sendCard.appendChild(cardHead("Performance by LinkedIn profile", senderInsight(db.senders ?? []) || "Which sending profile is driving conversations"));
-  sendCard.appendChild(senderTable(db.senders ?? []));
+  sendCard.appendChild(cardHead("Performance by LinkedIn profile", senderInsight(db.senders ?? []) || "What each profile sent, and what came back"));
+  sendCard.appendChild(senderTable(db.senders ?? [], !a.sender));
   grid.appendChild(sendCard);
 
   /* --- recent replies --- */
@@ -1669,27 +1734,53 @@ function tagMixChart(mix, live) {
   return wrap;
 }
 
-function senderTable(rows) {
+function senderTable(rows, showVolumes = true) {
   const wrap = document.createElement("div");
   if (!rows.length) { wrap.innerHTML = `<div class="empty-note">No sender data yet.</div>`; return wrap; }
   const max = Math.max(...rows.map(r => Number(r.conversations) || 0), 1);
   const t = document.createElement("table"); t.className = "an-table";
-  t.innerHTML = `<thead><tr><th>LinkedIn profile</th><th>Conversations</th><th>Replies</th><th>Awaiting reply</th><th>Avg response</th></tr></thead>`;
+  // Two groups, deliberately labelled: the first three columns cover the selected period,
+  // the rest are live totals. Mixing the two silently is how you get a nonsense funnel.
+  t.innerHTML = `<thead>
+      <tr><th>LinkedIn profile</th>
+      ${showVolumes ? `<th>Messages sent</th><th>Replies</th><th>Reply rate</th>` : ""}
+      <th>Conversations</th><th>Awaiting reply</th><th>Avg response</th></tr>
+    </thead>`;
   const tb = document.createElement("tbody");
   for (const r of rows) {
     const tr = document.createElement("tr");
     const c1 = document.createElement("td"); c1.className = "name"; c1.textContent = r.name ?? "—";
+    tr.appendChild(c1);
+    if (showVolumes) {
+      for (const field of ["messages_sent", "replies", "reply_pct"]) {
+        const td = document.createElement("td");
+        td.dataset.sendervol = r.name ?? "";
+        td.dataset.volfield = field;
+        td.textContent = "…";                  // filled in by paintSenderVolumes()
+        td.className = "muted-cell";
+        tr.appendChild(td);
+      }
+    }
     const c2 = document.createElement("td"); c2.className = "barcell";
     const bar = document.createElement("div"); bar.className = "bar";
     bar.style.width = Math.max(4, (Number(r.conversations) / max) * 100) + "%";
     const num = document.createElement("div"); num.style.fontWeight = "600"; num.textContent = nf(r.conversations);
     c2.append(num, bar);
-    const c3 = document.createElement("td"); c3.textContent = nf(r.lead_replies);
     const c4 = document.createElement("td"); c4.textContent = nf(r.awaiting);
     const c5 = document.createElement("td"); c5.textContent = dur(r.response_avg_secs);
-    tr.append(c1, c2, c3, c4, c5); tb.appendChild(tr);
+    tr.append(c2, c4, c5); tb.appendChild(tr);
   }
-  t.appendChild(tb); wrap.appendChild(t);
+  t.appendChild(tb);
+  const scroller = document.createElement("div"); scroller.className = "table-scroll";
+  scroller.appendChild(t); wrap.appendChild(scroller);
+  if (showVolumes) {
+    const note = document.createElement("div");
+    note.className = "sub"; note.style.marginTop = "8px";
+    note.textContent = "Messages sent, Replies and Reply rate cover the selected period. "
+      + "Conversations and Awaiting reply are live totals — and only a lead who replies becomes a conversation, "
+      + "so messages sent is normally much higher. People who were messaged but never answered are not listed in the inbox.";
+    wrap.appendChild(note);
+  }
   return wrap;
 }
 
