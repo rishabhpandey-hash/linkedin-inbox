@@ -119,6 +119,10 @@
   #list-controls .tbtn{flex:none}
   .badge.wait{background:#fdeeee;color:var(--red)}
   .badge.assigned{background:#eaf7ee;color:var(--green)}
+  .badge.tag{background:#eef1f4;color:#455;font-weight:500}
+  .badge.tag.closed{background:#f4eef0;color:#8a5b6b}
+  #tag-select{padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:.8rem;flex:1;min-width:0;color:var(--muted)}
+  #chips .note{font-size:.72rem;color:var(--text-muted);width:100%;margin-top:2px}
   #assign-row{display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--line);background:#fbfcfd}
   #assign-row .lbl{font-size:.78rem;color:var(--muted);font-weight:600}
   #assign-select{padding:5px 9px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:.82rem;max-width:240px}
@@ -340,6 +344,7 @@
           <div id="list-controls">
             <select id="sender-select" aria-label="Filter by LinkedIn profile" data-role="sender-filter"><option value="">All profiles</option></select>
             <select id="assignee-select" class="hidden" aria-label="Filter by assignee" data-role="assignee-filter"><option value="">Anyone</option></select>
+            <select id="tag-select" class="hidden" aria-label="Filter by Konnector tag" data-role="tag-filter"><option value="">Any tag</option></select>
             <select id="sort-select" aria-label="Sort conversations" data-role="sort">
               <option value="recent">Newest first</option>
               <option value="oldest_waiting">Longest waiting</option>
@@ -470,19 +475,22 @@ const state = {
   adminClientId: "", appStarted: false, refreshTimer: null, admin: null,
   tab: "inbox", days: "30", anSender: "", analytics: null, anLoading: false,
   assignee: "",              // admin: show only this person's queue
+  tag: "",                   // one Konnector tag
 };
 
 // filter key -> label + one-line meaning (also surfaced to agents via INBOX.describe())
 const FILTER_DEFS = [
   ["all", "All", "Every conversation where the lead has replied at least once"],
-  ["needs_reply", "Needs reply", "The lead spoke last — waiting on you"],
-  ["waiting_48", "Waiting 48h+", "Lead spoke last and has been waiting more than two days"],
+  ["needs_reply", "Needs reply", "The lead spoke last and nobody has tagged the thread as closed in Konnector"],
+  ["waiting_48", "Waiting 48h+", "Still awaiting a reply and has been waiting more than two days"],
   ["engaged", "In conversation", "A real back-and-forth is going"],
   ["answered", "We replied", "Your team spoke last"],
   ["first_reply", "Replied once", "The lead replied but the exchange never continued"],
   ["mine", "Assigned to me", "Routed to you by an admin"],
   ["unassigned", "Unassigned", "Nobody is looking after this lead yet"],
   ["assigned", "Assigned", "Routed to someone on the team"],
+  ["untagged", "To triage", "No Konnector tag yet — nobody has classified this lead"],
+  ["closed", "Closed", "Tagged Not Interested / SPAM / Closed Lost etc. — no reply needed"],
 ];
 const SORT_DEFS = [
   ["recent", "Newest first"],
@@ -508,7 +516,7 @@ function mirror() {
       user: d?.user ?? null,
       applied: {
         campaign_id: state.campaign, campaign_name: d ? campName(state.campaign) : "",
-        filter: state.filter, sort: state.sort, sender: state.sender, assignee: state.assignee, search: state.search,
+        filter: state.filter, sort: state.sort, sender: state.sender, assignee: state.assignee, tag: state.tag, search: state.search,
         analytics_period_days: state.days, analytics_sender: state.anSender,
       },
       counts: d?.counts ?? null,
@@ -518,7 +526,7 @@ function mirror() {
       senders: d?.senders ?? [],
       conversations: (d?.conversations ?? []).slice(0, 60).map(c => ({
         id: c.id, name: c.profile?.name, company: c.profile?.company_name,
-        status: c.conversation_status, last_direction: c.last_direction, assigned_to: c.assigned_to,
+        status: c.conversation_status, last_direction: c.last_direction, awaiting: c.awaiting, tags: c.tags, assigned_to: c.assigned_to,
         waiting_hours: c.waiting_hours, sender: c.sender_name,
         last_message_at: c.last_message_at, preview: c.last_message_preview,
       })),
@@ -544,6 +552,7 @@ window.INBOX = {
         "setSort(key)": SORT_DEFS.map(([k, l]) => ({ key: k, label: l })),
         "setSender(name|'')": "restrict to one LinkedIn sending profile",
         "setAssignee(email|'')": "admin: show only that person's routed leads",
+        "setTag(name|'')": "restrict to one Konnector tag (Not Interested, Follow-up Required, ...)",
         "assign(id, email|null)": "admin: route a lead to a teammate (null clears it)",
         "setCampaign(id|'')": "scope both tabs to one campaign",
         "search(text)": "server-side search over name, company, headline, message text and sender",
@@ -563,6 +572,7 @@ window.INBOX = {
   async setSort(key) { if (!SORT_DEFS.some(s => s[0] === key)) throw new Error("unknown sort"); state.sort = key; await load(true); return this.getState(); },
   async setSender(name) { state.sender = name ?? ""; await load(true); return this.getState(); },
   async setAssignee(email) { state.assignee = email ?? ""; await load(true); return this.getState(); },
+  async setTag(name) { state.tag = name ?? ""; await load(true); return this.getState(); },
   async assign(conversationId, email) {
     if (!state.data?.user?.is_admin) throw new Error("assigning leads is admin-only");
     const r = await api("/api/assign", { method: "POST", body: JSON.stringify({ conversation_id: conversationId, assignee_email: email ?? null }) });
@@ -695,7 +705,7 @@ $("login-btn").addEventListener("click", async () => {
 });
 $("logout-btn").addEventListener("click", async () => {
   await sb.auth.signOut();
-  Object.assign(state, { data: null, filter: "all", search: "", campaign: "", sender: "", assignee: "", sort: "recent", thread: null, adminClientId: "", admin: null, tab: "inbox", days: "30", anSender: "", analytics: null });
+  Object.assign(state, { data: null, filter: "all", search: "", campaign: "", sender: "", assignee: "", tag: "", sort: "recent", thread: null, adminClientId: "", admin: null, tab: "inbox", days: "30", anSender: "", analytics: null });
   for (const x of document.querySelectorAll("#range-row .chip")) x.classList.toggle("active", x.dataset.days === "30");
   $("search").value = ""; $("admin-btn").classList.add("hidden");
   $("admin-client-switch").classList.add("hidden"); $("admin-overlay").classList.add("hidden");
@@ -735,6 +745,7 @@ function inboxQuery() {
   if (state.search.trim()) qs.set("q", state.search.trim());
   if (state.sender) qs.set("sender", state.sender);
   if (state.assignee) qs.set("assignee", state.assignee);
+  if (state.tag) qs.set("tag", state.tag);
   return qs;
 }
 
@@ -792,7 +803,7 @@ function renderStats() {
   const c = state.data.counts ?? {};
   const tiles = [
     ["Conversations", c.all, "leads who have replied at least once"],
-    ["Awaiting your reply", c.needs_reply, "the lead spoke last"],
+    ["Awaiting your reply", c.needs_reply, "the lead spoke last and the thread is not tagged closed"],
     ["Waiting 48h+", c.waiting_48, "overdue"],
     ["In conversation", c.engaged, "active back-and-forth"],
   ];
@@ -828,6 +839,14 @@ function renderChips() {
     });
     wrap.appendChild(b);
   }
+  // be explicit about why "Needs reply" is lower than "the lead spoke last"
+  const raw = counts.lead_spoke_last_raw, real = counts.needs_reply ?? 0;
+  if (raw != null && raw > real) {
+    const note = document.createElement("div");
+    note.className = "note";
+    note.textContent = `${nf(raw)} leads spoke last, but ${nf(raw - real)} are already tagged closed in Konnector (Not Interested, SPAM…), so ${nf(real)} actually need a reply.`;
+    wrap.appendChild(note);
+  }
 }
 
 function renderControls() {
@@ -858,6 +877,15 @@ function renderControls() {
     asel.classList.add("hidden");
     state.assignee = "";
   }
+
+  // Konnector tags, most used first
+  const tsel = $("tag-select");
+  const tags = state.data?.tags ?? [];
+  tsel.innerHTML = '<option value="">Any tag</option>' +
+    tags.map(t => `<option value="${esc(t.name)}">${esc(t.name)} · ${t.n}</option>`).join("");
+  tsel.value = tags.some(t => t.name === state.tag) ? state.tag : "";
+  state.tag = tsel.value;
+  tsel.classList.toggle("hidden", !tags.length);
 }
 const campName = (id) => state.data.campaigns.find(c => c.id === id)?.name ?? "";
 // team members are stored by email; show the friendly label where we have one
@@ -893,13 +921,17 @@ function renderList() {
     if (cv.assigned_to) div.dataset.assignedTo = cv.assigned_to;
     const img = cv.profile?.image ? `<img src="${esc(cv.profile.image)}" alt="" onerror="this.remove()">` : "";
     const wh = cv.waiting_hours;
-    const await_ = cv.last_direction !== "REPLY" ? ""
+    const await_ = !cv.awaiting ? ""
       : wh != null && wh >= 48
         ? `<span class="badge wait">Waiting ${Math.round(wh / 24)} days</span>`
         : `<span class="badge await">Awaiting your reply</span>`;
     const campBadge = !state.campaign && state.data.campaigns.length > 1 ? `<span class="badge camp">${esc(shorten(campName(cv.campaign_id), 30))}</span>` : "";
     const assignBadge = cv.assigned_to
       ? `<span class="badge assigned" title="Routed to ${esc(cv.assigned_to)}">→ ${esc(teamName(cv.assigned_to))}</span>` : "";
+    const closedSet = state.data?.closed_tags ?? [];
+    const tagBadges = (cv.tags ?? []).slice(0, 2)
+      .map(t => `<span class="badge tag${closedSet.includes(t) ? " closed" : ""}">${esc(t)}</span>`).join("")
+      + ((cv.tags ?? []).length > 2 ? `<span class="badge tag" title="${esc((cv.tags ?? []).join(", "))}">+${cv.tags.length - 2}</span>` : "");
     div.innerHTML = `
       <span class="avatar">${img}${img ? "" : initials(cv.profile?.name)}</span>
       <div class="row-main">
@@ -908,8 +940,8 @@ function renderList() {
           <span class="row-time">${timeAgo(cv.last_message_at)}</span>
         </div>
         <div class="row-occ">${esc(cv.profile?.occupation ?? "")}</div>
-        <div class="row-preview ${cv.last_direction === "REPLY" ? "unreplied" : ""}">${cv.last_direction === "SENT" ? "You: " : ""}${esc(cv.last_message_preview ?? "")}</div>
-        <div class="badges">${await_}${assignBadge}${campBadge}<span class="badge via">via ${esc(cv.sender_name ?? "?")}</span></div>
+        <div class="row-preview ${cv.awaiting ? "unreplied" : ""}">${cv.last_direction === "SENT" ? "You: " : ""}${esc(cv.last_message_preview ?? "")}</div>
+        <div class="badges">${await_}${tagBadges}${assignBadge}${campBadge}<span class="badge via">via ${esc(cv.sender_name ?? "?")}</span></div>
       </div>`;
     div.addEventListener("click", () => openThread(cv.id));
     wrap.appendChild(div);
@@ -981,7 +1013,8 @@ function renderThread() {
   $("th-name").innerHTML = safeUrl
     ? `<a href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer">${esc(cv.profile?.name ?? "")}</a>`
     : esc(cv.profile?.name ?? "");
-  $("th-sub").textContent = [cv.profile?.occupation, campaign?.name, "via " + (cv.sender_name ?? "?")].filter(Boolean).join("  ·  ");
+  $("th-sub").textContent = [cv.profile?.occupation, campaign?.name, "via " + (cv.sender_name ?? "?"),
+    (cv.tags ?? []).length ? "tagged " + cv.tags.join(", ") : null].filter(Boolean).join("  ·  ");
   const box = $("msgs"); box.innerHTML = "";
   for (const m of messages) {
     const isOut = m.direction === "SENT";
@@ -1027,6 +1060,10 @@ $("sender-select").addEventListener("change", async (e) => {
   state.sender = e.target.value;
   try { await load(true); } catch (err) { console.error(err); }
 });
+$("tag-select").addEventListener("change", async (e) => {
+  state.tag = e.target.value;
+  try { await load(true); } catch (err) { console.error(err); }
+});
 $("assignee-select").addEventListener("change", async (e) => {
   state.assignee = e.target.value;
   try { await load(true); } catch (err) { console.error(err); }
@@ -1045,7 +1082,8 @@ $("export-btn").addEventListener("click", async () => {
     u.searchParams.set("sort", state.sort);                      // export what is on screen,
     if (state.search.trim()) u.searchParams.set("q", state.search.trim());  // search and
     if (state.sender) u.searchParams.set("sender", state.sender);
-    if (state.assignee) u.searchParams.set("assignee", state.assignee);            // sender included
+    if (state.assignee) u.searchParams.set("assignee", state.assignee);
+    if (state.tag) u.searchParams.set("tag", state.tag);            // sender included
     if (state.campaign) u.searchParams.set("campaign_id", state.campaign);
     if (state.adminClientId) u.searchParams.set("client_id", state.adminClientId);
     const res = await fetch(u, { headers: { Authorization: "Bearer " + t } });
@@ -1062,7 +1100,7 @@ $("export-btn").addEventListener("click", async () => {
 $("campaign-select").addEventListener("change", async (e) => {
   // reset the narrowing filters: they belong to the campaign you were just looking at
   state.campaign = e.target.value;
-  state.filter = "all"; state.sender = ""; state.assignee = ""; state.search = ""; $("search").value = "";
+  state.filter = "all"; state.sender = ""; state.assignee = ""; state.tag = ""; state.search = ""; $("search").value = "";
   state.anSender = "";                       // sender options differ per campaign
   closeThread();
   await load(true);
@@ -1088,7 +1126,7 @@ $("an-campaign").addEventListener("change", async (e) => {
   state.campaign = e.target.value;
   $("campaign-select").value = state.campaign;
   state.anSender = "";
-  state.filter = "all"; state.sender = ""; state.assignee = ""; state.search = ""; $("search").value = "";
+  state.filter = "all"; state.sender = ""; state.assignee = ""; state.tag = ""; state.search = ""; $("search").value = "";
   closeThread();
   try { await load(true); } catch (err) { console.error(err); }
   await loadAnalytics(true);
@@ -1638,7 +1676,7 @@ function setupClientSwitch() {
 }
 $("admin-client-switch").addEventListener("change", async (e) => {
   state.adminClientId = e.target.value;
-  state.campaign = ""; state.filter = "all"; state.sender = ""; state.assignee = ""; state.anSender = ""; state.search = ""; $("search").value = ""; state.analytics = null;
+  state.campaign = ""; state.filter = "all"; state.sender = ""; state.assignee = ""; state.tag = ""; state.anSender = ""; state.search = ""; $("search").value = ""; state.analytics = null;
   closeThread(); await load(true);
   if (state.tab === "analytics") loadAnalytics(true);
 });
