@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  LinkedIn Client Inbox + Analytics (Konnector-backed) — static UI for the Supabase edge function API.
+  LinkedIn Client Inbox + Analytics — static UI for the Supabase edge function API.
 
   FOR AI / AUTOMATION TOOLS
   -------------------------
@@ -345,7 +345,7 @@
           <div id="list-controls">
             <select id="sender-select" aria-label="Filter by LinkedIn profile" data-role="sender-filter"><option value="">All profiles</option></select>
             <select id="assignee-select" class="hidden" aria-label="Filter by assignee" data-role="assignee-filter"><option value="">Anyone</option></select>
-            <select id="tag-select" class="hidden" aria-label="Filter by Konnector tag" data-role="tag-filter"><option value="">Any tag</option></select>
+            <select id="tag-select" class="hidden" aria-label="Filter by lead tag" data-role="tag-filter"><option value="">Any tag</option></select>
             <select id="sort-select" aria-label="Sort conversations" data-role="sort">
               <option value="recent">Newest first</option>
               <option value="oldest_waiting">Longest waiting</option>
@@ -428,7 +428,7 @@
     <h3>Mapped campaigns</h3>
     <table id="admin-campaigns"><thead><tr><th>Campaign</th><th>Client</th><th>Status</th><th>Synced</th><th></th></tr></thead><tbody></tbody></table>
 
-    <h3>Available Konnector campaigns (not mapped)</h3>
+    <h3>Available campaigns (not mapped)</h3>
     <table id="admin-available"><thead><tr><th>Campaign</th><th>Map to</th><th></th></tr></thead><tbody></tbody></table>
 
     <h3>Users</h3>
@@ -476,13 +476,13 @@ const state = {
   adminClientId: "", appStarted: false, refreshTimer: null, admin: null,
   tab: "inbox", days: "30", anSender: "", analytics: null, anLoading: false,
   assignee: "",              // admin: show only this person's queue
-  tag: "",                   // one Konnector tag
+  tag: "",                   // one lead tag
 };
 
 // filter key -> label + one-line meaning (also surfaced to agents via INBOX.describe())
 const FILTER_DEFS = [
   ["all", "All", "Every conversation where the lead has replied at least once"],
-  ["needs_reply", "Needs reply", "The lead spoke last and nobody has tagged the thread as closed in Konnector"],
+  ["needs_reply", "Needs reply", "The lead spoke last and the thread is not tagged as closed"],
   ["waiting_48", "Waiting 48h+", "Still awaiting a reply and has been waiting more than two days"],
   ["engaged", "In conversation", "A real back-and-forth is going"],
   ["answered", "We replied", "Your team spoke last"],
@@ -490,7 +490,7 @@ const FILTER_DEFS = [
   ["mine", "Assigned to me", "Routed to you by an admin"],
   ["unassigned", "Unassigned", "Nobody is looking after this lead yet"],
   ["assigned", "Assigned", "Routed to someone on the team"],
-  ["untagged", "To triage", "No Konnector tag yet — nobody has classified this lead"],
+  ["untagged", "To triage", "No tag yet — nobody has classified this lead"],
   ["closed", "Closed", "Tagged Not Interested / SPAM / Closed Lost etc. — no reply needed"],
 ];
 const SORT_DEFS = [
@@ -553,7 +553,7 @@ window.INBOX = {
         "setSort(key)": SORT_DEFS.map(([k, l]) => ({ key: k, label: l })),
         "setSender(name|'')": "restrict to one LinkedIn sending profile",
         "setAssignee(email|'')": "admin: show only that person's routed leads",
-        "setTag(name|'')": "restrict to one Konnector tag (Not Interested, Follow-up Required, ...)",
+        "setTag(name|'')": "restrict to one lead tag (Not Interested, Follow-up Required, ...)",
         "assign(id, email|null)": "admin: route a lead to a teammate (null clears it)",
         "setCampaign(id|'')": "scope both tabs to one campaign",
         "search(text)": "server-side search over name, company, headline, message text and sender",
@@ -845,7 +845,7 @@ function renderChips() {
   if (raw != null && raw > real) {
     const note = document.createElement("div");
     note.className = "note";
-    note.textContent = `${nf(raw)} leads spoke last, but ${nf(raw - real)} are already tagged closed in Konnector (Not Interested, SPAM…), so ${nf(real)} actually need a reply.`;
+    note.textContent = `${nf(raw)} leads spoke last, but ${nf(raw - real)} are already tagged as closed (Not Interested, SPAM…), so ${nf(real)} actually need a reply.`;
     wrap.appendChild(note);
   }
 }
@@ -879,7 +879,7 @@ function renderControls() {
     state.assignee = "";
   }
 
-  // Konnector tags, most used first
+  // lead tags, most used first
   const tsel = $("tag-select");
   const tags = state.data?.tags ?? [];
   tsel.innerHTML = '<option value="">Any tag</option>' +
@@ -1213,7 +1213,7 @@ function renderAnalytics() {
     const suppressed = (live.awaiting_raw ?? 0) - (live.awaiting ?? 0);
     attn.innerHTML = `<span class="ic">${crit ? "⚠️" : "💬"}</span>
       <span class="tx"><strong>${nf(live.awaiting)} conversation${live.awaiting === 1 ? "" : "s"} waiting on a reply</strong>${crit ? ` — ${nf(live.awaiting_48h)} have been waiting more than 48 hours.` : "."}${
-        suppressed > 0 ? ` <span style="color:var(--text-secondary)">(${nf(suppressed)} more spoke last but are tagged closed in Konnector, so they are not counted.)</span>` : ""}</span>`;
+        suppressed > 0 ? ` <span style="color:var(--text-secondary)">(${nf(suppressed)} more spoke last but are tagged as closed, so they are not counted.)</span>` : ""}</span>`;
     const btn = document.createElement("button");
     btn.textContent = "Open in inbox";
     btn.addEventListener("click", async () => {
@@ -1310,8 +1310,8 @@ function renderAnalytics() {
   const mix = db.tag_mix ?? [];
   tagCard.appendChild(cardHead("Lead outcomes",
     mix.length
-      ? `How your team has classified these ${nf(live.conversations ?? 0)} conversations in Konnector. Greyed rows are closed — they never count as needing a reply.`
-      : "No Konnector tags have been applied to these leads yet."));
+      ? `How your team has classified these ${nf(live.conversations ?? 0)} conversations. Greyed rows are closed — they never count as needing a reply.`
+      : "No tags have been applied to these leads yet."));
   tagCard.appendChild(tagMixChart(mix, live));
   grid.appendChild(tagCard);
 
@@ -1383,7 +1383,7 @@ function renderAnalytics() {
   if ((db.campaigns ?? []).length > 1) {
     const cCard = document.createElement("div");
     cCard.className = "card col-12";
-    // Konnector cannot split its per-campaign volumes by sender, so drop those columns
+    // per-campaign volumes cannot be split by sender upstream, so drop those columns
     // rather than show campaign-wide numbers under a per-sender heading
     const volumesOk = a.sender_scoped_volumes !== false && !state.anSender;
     cCard.appendChild(cardHead("Campaign comparison", volumesOk
@@ -1628,7 +1628,7 @@ function heatmap(cells) {
 function tagMixChart(mix, live) {
   const wrap = document.createElement("div");
   if (!mix.length) {
-    wrap.innerHTML = `<div class="empty-note">Tags are swept from Konnector every hour — once your team tags leads, the breakdown appears here.</div>`;
+    wrap.innerHTML = `<div class="empty-note">Tags sync every hour — once your team tags leads, the breakdown appears here.</div>`;
     return wrap;
   }
   const max = Math.max(...mix.map(m => Number(m.n) || 0), 1);
@@ -1766,8 +1766,8 @@ async function refreshAdmin() {
       <td><select data-mapsel="${i}">${clientOpts}</select></td>
       <td><button class="mini go" data-map="${i}">Map</button></td></tr>`).join("") ||
       (ov.available_error
-        ? `<tr><td colspan="3" style="color:var(--red)">Could not reach Konnector to list campaigns: ${esc(ov.available_error)}</td></tr>`
-        : `<tr><td colspan="3" style="color:var(--muted)">All Konnector campaigns are mapped.</td></tr>`);
+        ? `<tr><td colspan="3" style="color:var(--red)">Could not load the campaign list: ${esc(ov.available_error)}</td></tr>`
+        : `<tr><td colspan="3" style="color:var(--muted)">All campaigns are mapped.</td></tr>`);
     $("admin-users").querySelector("tbody").innerHTML = ov.users.map(u => `
       <tr><td>${esc(u.email)}${u.is_admin ? ' <span class="badge camp">admin</span>' : ""}</td>
       <td>${esc(cname(u.client_id))}</td><td>${u.can_reply ? "yes" : "view only"}</td>

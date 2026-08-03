@@ -1,7 +1,7 @@
 # LinkedIn Client Inbox
 
-A client-facing inbox and analytics dashboard for LinkedIn outreach campaigns run in
-[Konnector](https://konnector.ai). Clients sign in with their work email, read the conversations
+A client-facing inbox and analytics dashboard for LinkedIn outreach campaigns.
+Clients sign in with their work email, read the conversations
 their campaigns produced, reply from the dashboard, and see how the campaigns are performing.
 
 **Live:** https://rishabhpandey-hash.github.io/linkedin-inbox/
@@ -14,17 +14,17 @@ Supabase edge function, so the page ships no secrets beyond the public anon key.
 ## How it fits together
 
 ```
-Konnector API  ──sync──▶  Supabase (Postgres + edge function "inbox")  ──JSON──▶  this page
+Outreach platform  ──sync──▶  Supabase (Postgres + edge function "inbox")  ──JSON──▶  this page
    ▲                            │
    └────── reply / webhook ──────┘
 ```
 
-- **Sync** — the edge function pulls `campaign-lead-conversations` for every mapped campaign
-  (hourly via `pg_cron`, and within seconds of a `prospect_replied` webhook from Konnector).
-- **Reply** — a reply posts to Konnector `send_message` as the LinkedIn profile that owns that
-  conversation, so the lead sees a message from the person they were already talking to.
+- **Sync** — the edge function pulls conversations for every mapped campaign hourly via
+  `pg_cron`, and within seconds of a reply webhook from the outreach platform.
+- **Reply** — a reply is sent from the LinkedIn profile that owns that conversation, so the
+  lead sees a message from the person they were already talking to.
 - **Analytics** — conversation-level metrics come from the Postgres function `inbox_analytics`;
-  invitation/connection/message volumes come from Konnector's `dashboard-info` (cached 10 minutes).
+  invitation/connection/message volumes come from the outreach platform (cached 10 minutes).
 
 Access control: `client_users` is the whitelist (email → client, `can_reply`, `is_admin`, optional
 per-campaign scope). Everything is filtered to the signed-in user's client in the function; the
