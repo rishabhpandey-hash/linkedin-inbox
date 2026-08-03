@@ -114,14 +114,15 @@
   .chip .c{opacity:.75;font-weight:500}
   #search-row{padding:8px 12px;border-bottom:1px solid var(--line)}
   #search{width:100%;padding:8px 11px;border:1px solid var(--line);border-radius:9px}
-  #list-controls{display:flex;gap:6px;margin-top:8px;align-items:center}
-  #list-controls select{flex:1;min-width:0;padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:.8rem;color:var(--muted)}
-  #list-controls .tbtn{flex:none}
+  /* four filters + export do not fit one row in a 410px pane, so let them wrap */
+  #list-controls{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;align-items:center}
+  #list-controls select{min-width:0;width:100%;padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:.8rem;color:var(--muted)}
+  #list-controls select.hidden{display:none}
+  #list-controls .tbtn{justify-self:start}
   .badge.wait{background:#fdeeee;color:var(--red)}
   .badge.assigned{background:#eaf7ee;color:var(--green)}
   .badge.tag{background:#eef1f4;color:#455;font-weight:500}
   .badge.tag.closed{background:#f4eef0;color:#8a5b6b}
-  #tag-select{padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:.8rem;flex:1;min-width:0;color:var(--muted)}
   #chips .note{font-size:.72rem;color:var(--text-muted);width:100%;margin-top:2px}
   #assign-row{display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--line);background:#fbfcfd}
   #assign-row .lbl{font-size:.78rem;color:var(--muted);font-weight:600}
