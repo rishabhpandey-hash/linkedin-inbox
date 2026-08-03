@@ -1210,8 +1210,10 @@ function renderAnalytics() {
     const crit = (live.awaiting_48h ?? 0) > 0;
     const attn = document.createElement("div");
     attn.className = "attn" + (crit ? " crit" : "");
+    const suppressed = (live.awaiting_raw ?? 0) - (live.awaiting ?? 0);
     attn.innerHTML = `<span class="ic">${crit ? "⚠️" : "💬"}</span>
-      <span class="tx"><strong>${nf(live.awaiting)} conversation${live.awaiting === 1 ? "" : "s"} waiting on a reply</strong>${crit ? ` — ${nf(live.awaiting_48h)} have been waiting more than 48 hours.` : "."}</span>`;
+      <span class="tx"><strong>${nf(live.awaiting)} conversation${live.awaiting === 1 ? "" : "s"} waiting on a reply</strong>${crit ? ` — ${nf(live.awaiting_48h)} have been waiting more than 48 hours.` : "."}${
+        suppressed > 0 ? ` <span style="color:var(--text-secondary)">(${nf(suppressed)} more spoke last but are tagged closed in Konnector, so they are not counted.)</span>` : ""}</span>`;
     const btn = document.createElement("button");
     btn.textContent = "Open in inbox";
     btn.addEventListener("click", async () => {
@@ -1240,7 +1242,7 @@ function renderAnalytics() {
       ${kpi("Reply rate", fn.message_reply_pct != null ? pct(fn.message_reply_pct) : "—", "of messages got a reply")}
       ${kpi("People who replied", nf(rng.leads_replying ?? 0), "in this period")}
       ${kpi("In conversation now", nf(live.engaged ?? 0), "back-and-forth going")}
-      ${kpi("Awaiting your reply", nf(live.awaiting ?? 0), "right now")}
+      ${kpi("Awaiting your reply", nf(live.awaiting ?? 0), "right now, excluding closed tags")}
     </div>`;
   grid.appendChild(heroCard);
 
@@ -1297,10 +1299,21 @@ function renderAnalytics() {
       ${kpi("Median response", dur(rng.response_median_secs), "typical case")}
       ${kpi("Average response", dur(rng.response_avg_secs), "pulled up by slow outliers")}
       ${kpi("Answered within 24h", rng.response_under_24h_pct != null ? pct(rng.response_under_24h_pct) : "—", `${nf(rng.answered ?? 0)} answered`)}
-      ${kpi("Never answered", nf(rng.unanswered ?? 0), "leads replied, no response yet")}
+      ${kpi("Never answered", nf(rng.unanswered ?? 0), "replied, no response, not tagged closed")}
     </div>
     <div class="sub" style="margin-top:10px">Faster first responses are the single biggest lever on booked calls — replies inside the first hour convert best.</div>`);
   grid.appendChild(respCard);
+
+  /* --- what the team's tags say about these leads --- */
+  const tagCard = document.createElement("div");
+  tagCard.className = "card col-12";
+  const mix = db.tag_mix ?? [];
+  tagCard.appendChild(cardHead("Lead outcomes",
+    mix.length
+      ? `How your team has classified these ${nf(live.conversations ?? 0)} conversations in Konnector. Greyed rows are closed — they never count as needing a reply.`
+      : "No Konnector tags have been applied to these leads yet."));
+  tagCard.appendChild(tagMixChart(mix, live));
+  grid.appendChild(tagCard);
 
   /* --- charts --- */
   const actCard = document.createElement("div");
@@ -1610,12 +1623,58 @@ function heatmap(cells) {
 }
 
 /* ---- sender leaderboard ---- */
+// Outcome mix from the team's own tags: two classes only (open vs closed), so a
+// blue/grey split reads instantly without a rainbow.
+function tagMixChart(mix, live) {
+  const wrap = document.createElement("div");
+  if (!mix.length) {
+    wrap.innerHTML = `<div class="empty-note">Tags are swept from Konnector every hour — once your team tags leads, the breakdown appears here.</div>`;
+    return wrap;
+  }
+  const max = Math.max(...mix.map(m => Number(m.n) || 0), 1);
+  const t = document.createElement("table"); t.className = "an-table";
+  t.innerHTML = `<thead><tr><th>Tag</th><th style="width:55%">Leads</th><th>Count</th><th>Share</th></tr></thead>`;
+  const tb = document.createElement("tbody");
+  const totalConvs = Number(live?.conversations) || 0;
+  for (const m of mix) {
+    const tr = document.createElement("tr");
+    const c1 = document.createElement("td"); c1.className = "name";
+    c1.textContent = m.name + (m.closed ? "  · closed" : "");
+    if (m.closed) c1.style.color = "var(--text-muted)";
+    const c2 = document.createElement("td"); c2.className = "barcell";
+    const bar = document.createElement("div"); bar.className = "bar";
+    bar.style.width = Math.max(3, (Number(m.n) / max) * 100) + "%";
+    bar.style.background = m.closed ? "#b9c2cc" : C.s1;
+    c2.appendChild(bar);
+    const c3 = document.createElement("td"); c3.textContent = nf(m.n);
+    const c4 = document.createElement("td");
+    c4.textContent = totalConvs ? ((100 * Number(m.n)) / totalConvs).toFixed(1) + "%" : "—";
+    tr.append(c1, c2, c3, c4); tb.appendChild(tr);
+  }
+  t.appendChild(tb); wrap.appendChild(t);
+
+  const lg = document.createElement("div"); lg.className = "legend";
+  for (const [label, colour] of [["Still in play", C.s1], ["Closed — no reply needed", "#b9c2cc"]]) {
+    const it = document.createElement("span"); it.className = "it";
+    const sw = document.createElement("span"); sw.className = "sq"; sw.style.background = colour;
+    const tx = document.createElement("span"); tx.textContent = label;
+    it.append(sw, tx); lg.appendChild(it);
+  }
+  wrap.appendChild(lg);
+  if (live?.untagged) {
+    const n = document.createElement("div"); n.className = "sub"; n.style.marginTop = "6px";
+    n.textContent = `${nf(live.untagged)} conversation${live.untagged === 1 ? " has" : "s have"} no tag yet — see the "To triage" filter in the inbox.`;
+    wrap.appendChild(n);
+  }
+  return wrap;
+}
+
 function senderTable(rows) {
   const wrap = document.createElement("div");
   if (!rows.length) { wrap.innerHTML = `<div class="empty-note">No sender data yet.</div>`; return wrap; }
   const max = Math.max(...rows.map(r => Number(r.conversations) || 0), 1);
   const t = document.createElement("table"); t.className = "an-table";
-  t.innerHTML = `<thead><tr><th>LinkedIn profile</th><th>Conversations</th><th>Replies</th><th>Waiting</th><th>Avg response</th></tr></thead>`;
+  t.innerHTML = `<thead><tr><th>LinkedIn profile</th><th>Conversations</th><th>Replies</th><th>Awaiting reply</th><th>Avg response</th></tr></thead>`;
   const tb = document.createElement("tbody");
   for (const r of rows) {
     const tr = document.createElement("tr");
